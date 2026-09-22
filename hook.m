@@ -146,7 +146,18 @@ static void patchzero_start_termination_block_window(void) {
 // could dangle; a window number is just a scalar and never dangles.
 static NSInteger gPatchZeroSuppressedWindowNumber = 0;
 
+// Key window number at the moment we suppressed the alert, so the reopen
+// pass can restore focus to exactly that one window instead of calling
+// makeKeyAndOrderFront on every window (which made the key window hop
+// between all windows every ~20s tamper tick: focus flicker and a dead
+// main menu bar, since menu actions route through the key window /
+// first responder chain). Stored as a scalar number, not a pointer:
+// under -fno-objc-arc a raw pointer could dangle if the window is
+// released between the alert and the reopen dispatch.
+static NSInteger gPatchZeroKeyWindowNumber = 0;
+
 static void patchzero_reopen_windows_shortly(void) {
+    NSInteger restoreKeyNumber = gPatchZeroKeyWindowNumber;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         for (NSWindow *window in [NSApplication sharedApplication].windows) {
             // Skip the suppressed piracy alert's own (empty) window - it is
@@ -155,15 +166,67 @@ static void patchzero_reopen_windows_shortly(void) {
             if ([window windowNumber] == gPatchZeroSuppressedWindowNumber) {
                 continue;
             }
-            [window makeKeyAndOrderFront:nil];
+            // Only the previously-key window is allowed to steal key status;
+            // the rest are shown without grabbing focus. Re-keying every
+            // window (old behavior) made the key window hop around, which
+            // killed focus and the main menu bar.
+            if (restoreKeyNumber != 0 && [window windowNumber] == restoreKeyNumber) {
+                [window makeKeyAndOrderFront:nil];
+            } else {
+                [window orderFront:nil];
+            }
         }
-        [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+        // Reactivate only if the app was already active: unconditional
+        // activateIgnoringOtherApps:YES stole focus from the user's frontmost
+        // app on every tamper tick (flicker).
+        if ([[NSApplication sharedApplication] isActive]) {
+            [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+        }
     });
 }
 
-// NSAlert's -window is private API in the SDK headers but is present at
-// runtime; declare it locally so we can hide the empty alert window. If it
-// ever goes away the guard below simply leaves the window alone.
+// Main menu bar protection: the tamper check (or our own window juggling)
+// can leave the app's main menu cleared, which is what makes "About
+// TickTick", "Close" and every other menu item dead. Every legit menu
+// operation goes through setMainMenu:; we let non-empty replacements
+// through (app might legitimately rebuild menus) but reject nil and empty
+// menus, and immediately restore a captured copy so the bar never goes
+// permanently dead.
+static NSMenu *gPatchZeroProtectedMenu = nil; // strong; set once, never released (process lifetime)
+
+@implementation NSApplication (PatchZeroProtectMainMenu)
+
+- (void)patched_setMainMenu:(NSMenu *)menu {
+    if (menu == nil || menu.numberOfItems == 0) {
+        if (gPatchZeroProtectedMenu != nil && [self mainMenu] != gPatchZeroProtectedMenu) {
+            NSLog(@"[PatchZero] Blocked clearing of main menu (tamper check), restoring.");
+            [self patched_setMainMenu:gPatchZeroProtectedMenu];
+        }
+        return; // refuse to clear the menu
+    }
+    if (gPatchZeroProtectedMenu == nil) {
+        gPatchZeroProtectedMenu = [menu retain];
+    }
+    [self patched_setMainMenu:menu];
+}
+
+@end
+
+static void patchzero_install_menu_protection(void) {
+    Class cls = [NSApplication class];
+    Method orig = class_getInstanceMethod(cls, @selector(setMainMenu:));
+    Method repl = class_getInstanceMethod(cls, @selector(patched_setMainMenu:));
+    if (orig && repl) {
+        method_exchangeImplementations(orig, repl);
+        // Seed the protected menu with whatever the app has right now.
+        if (gPatchZeroProtectedMenu == nil) {
+            gPatchZeroProtectedMenu = [[NSApplication sharedApplication].mainMenu retain];
+        }
+        NSLog(@"[PatchZero] Hooked setMainMenu: (menu bar protection).");
+    } else {
+        NSLog(@"[PatchZero] WARNING: could not hook setMainMenu:.");
+    }
+}
 @interface NSAlert (PatchZeroWindowAccess)
 - (NSWindow *)window;
 @end
@@ -195,6 +258,7 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Download TickTick.");
         patchzero_hide_suppressed_alert_window(self);
+        gPatchZeroKeyWindowNumber = [NSApplication sharedApplication].keyWindow.windowNumber;
         patchzero_start_termination_block_window();
         patchzero_reopen_windows_shortly();
         return NSAlertFirstButtonReturn;
@@ -206,6 +270,7 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Download TickTick.");
         patchzero_hide_suppressed_alert_window(self);
+        gPatchZeroKeyWindowNumber = [NSApplication sharedApplication].keyWindow.windowNumber;
         patchzero_start_termination_block_window();
         patchzero_reopen_windows_shortly();
         if (handler) {
@@ -622,6 +687,7 @@ static void patch_init() {
     NSLog(@"[PatchZero] Hooking user model...");
     patchzero_install_container_redirect();
     patchzero_install_json_patch();
+    patchzero_install_menu_protection();
     // Confirmed by hand: clicking "Cancel" quits the app. Answering with the
     // other button ("Download TickTick") instead - see
     // PatchZeroSuppressPiracyWarning above for the reasoning.

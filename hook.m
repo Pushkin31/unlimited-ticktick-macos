@@ -344,6 +344,35 @@ static void patchzero_arm_minimize_guard(double seconds) {
     });
 }
 
+// Block minimize: while the guard is armed, refuse miniaturize: outright
+// (returns without calling the original). Blocking BEFORE the animation
+// runs is what actually stops the flicker - restoring after
+// NSWindowDidMiniaturizeNotification (previous approach) still shows the
+// collapse/restore cycle as a visible flicker.
+@implementation NSWindow (PatchZeroBlockMinimize)
+
+- (void)patched_miniaturize:(id)sender {
+    if (gPatchZeroMinimizeGuardArmed) {
+        NSLog(@"[PatchZero] Minimize guard: blocked miniaturize: on window %ld.", (long)[self windowNumber]);
+        return;
+    }
+    [self patched_miniaturize:sender];
+}
+
+@end
+
+static void patchzero_install_minimize_blocker(void) {
+    Class cls = [NSWindow class];
+    Method orig = class_getInstanceMethod(cls, @selector(miniaturize:));
+    Method repl = class_getInstanceMethod(cls, @selector(patched_miniaturize:));
+    if (orig && repl) {
+        method_exchangeImplementations(orig, repl);
+        NSLog(@"[PatchZero] Hooked NSWindow miniaturize: (block-while-armed).");
+    } else {
+        NSLog(@"[PatchZero] WARNING: could not hook NSWindow miniaturize:.");
+    }
+}
+
 static void patchzero_install_minimize_guard(void) {
     [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidMiniaturizeNotification
                                                       object:nil
@@ -840,6 +869,7 @@ static void patch_init() {
         // Minimize guard for first launch: armed for 8s (the user cannot
         // physically minimize anything meaningful in that window; the first
         // tamper ticks land here).
+        patchzero_install_minimize_blocker();
         patchzero_install_minimize_guard();
         patchzero_arm_minimize_guard(8.0);
         // Seed window snapshot, then keep it fresh every 0.5s so the reopen

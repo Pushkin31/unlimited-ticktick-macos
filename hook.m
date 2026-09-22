@@ -134,10 +134,12 @@ static void patchzero_start_termination_block_window(void) {
 // So instead: let close/orderOut proceed normally (satisfies whatever the
 // check's own bookkeeping expects, avoiding the retry storm) and re-show the
 // window a moment afterward.
-// Window of the last suppressed piracy alert, kept so the reopen pass below
-// does not raise an empty NSAlert window over the app's real UI. Declared
-// before first use (C order requirement).
-static __weak NSWindow *gPatchZeroSuppressedAlertWindow = nil;
+// Window number of the last suppressed piracy alert, kept so the reopen pass
+// below does not raise an empty NSAlert window over the app's real UI.
+// Stored as an integer (not a pointer): the build uses manual reference
+// counting (-fno-objc-arc), where __weak is unavailable, and a raw pointer
+// could dangle; a window number is just a scalar and never dangles.
+static NSInteger gPatchZeroSuppressedWindowNumber = 0;
 
 static void patchzero_reopen_windows_shortly(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -145,7 +147,7 @@ static void patchzero_reopen_windows_shortly(void) {
             // Skip the suppressed piracy alert's own (empty) window - it is
             // created as a side effect of the alert lifecycle and would
             // otherwise pop up blank right after we suppressed the alert.
-            if (window == gPatchZeroSuppressedAlertWindow) {
+            if ([window windowNumber] == gPatchZeroSuppressedWindowNumber) {
                 continue;
             }
             [window makeKeyAndOrderFront:nil];
@@ -172,7 +174,7 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
     }
     if (alertWindow) {
         [alertWindow orderOut:nil];
-        gPatchZeroSuppressedAlertWindow = alertWindow;
+        gPatchZeroSuppressedWindowNumber = [alertWindow windowNumber];
     }
 }
 

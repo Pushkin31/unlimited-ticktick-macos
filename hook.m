@@ -3,6 +3,12 @@
 #import <objc/runtime.h>
 #import <sqlite3.h>
 
+// This file is compiled without ARC (-fno-objc-arc in patch.sh), so:
+// - __weak / __strong qualifiers are unavailable: keep static ownership
+//   explicit with retain/release where an object outlives one call;
+// - autoreleased results assigned to statics must be retained or they
+//   dangle after the enclosing autorelease pool drains.
+
 // TickTick 8.0.80 added a runtime tamper/piracy check, independent of the
 // isPro state itself, that pops an "Application Not Licensed" NSAlert
 // ("We detected that you are using a pirated TickTick application...").
@@ -11,67 +17,66 @@
 // chasing that we suppress it at its single, guaranteed choke point: every
 // alert - regardless of what triggers it - has to go through NSAlert's
 // presentation methods to ever become visible.
+// All 41 localized titles of the piracy alert, as compile-time NSString
+// literals. Literals are statically allocated constants - they live for the
+// whole process and need no retain/release. That matters here because this
+// file is built with -fno-objc-arc: an autoreleased NSSet (setWithObjects:)
+// assigned to a static would dangle after the autorelease pool drains (seen
+// as EXC_BAD_ACCESS / PAC failure in objc_msgSend(containsObject:) on 8.2.20
+// and 8.2.10). Do NOT "optimize" this back into an NSSet.
+static NSString *const kPatchZeroPiracyTitles[] = {
+    @"Anwendung nicht lizenziert.",
+    @"Aplicació no llicenciada.",
+    @"Aplicación no autorizada",
+    @"Aplicativo não licenciado",
+    @"Aplicația nu este licențiată.",
+    @"Aplikace není licencována.",
+    @"Aplikacija ni licencirana.",
+    @"Aplikacija nije licencirana.",
+    @"Aplikasi Tidak Berlisensi.",
+    @"Aplikasi Tidak Dilisensikan",
+    @"Aplikácia nie je licencovaná.",
+    @"Application Not Licensed",
+    @"Application non licence",
+    @"Applicazione non autorizzata.",
+    @"Applikasjon ikke lisensiert",
+    @"Applikationen er ikke licenseret.",
+    @"Applikationen är inte licensierad.",
+    @"Az alkalmazás nincs engedélyezve.",
+    @"Ostrzeżenie o nielegalnej kopii aplikacji",
+    @"Programa neleisti.",
+    @"Programma nav licencēta.",
+    @"Rhybudd Dros Fersiwn Anghyfreithlon",
+    @"Sovellusta ei ole lisensoitu",
+    @"Toepassing niet gelicentieerd",
+    @"Uygulama Lisanslı Değil.",
+    @"Προειδοποίηση για παραβίαση πνευματικών δικαιωμάτων",
+    @"Попередження про порушення авторських прав.",
+    @"Праграма не ліцэнзавана",
+    @"Приложение не лицензировано",
+    @"Приложението не е лицензирано.",
+    @"אזהרת פרצות זכויות יוצרים",
+    @"برنامہ لائسنس نہیں ہے۔",
+    @"تحذير القرصنة",
+    @"هشدار قانونی نسخه‌ی غیرمجاز",
+    @"பிரதியேக உரிமை இல்லாத பயன்பாடு",
+    @"แจ้งเตือนการละเมิดลิขสิทธิ์",
+    @"Ứng dụng không được cấp phép",
+    @"ライセンスされていないアプリケーション",
+    @"盗版警告",
+    @"盜版警告",
+    @"해적판을 경고",
+    nil, // array terminator
+};
+
 static BOOL patchzero_alert_is_piracy_warning(NSAlert *alert) {
     NSString *title = alert.messageText ?: @"";
     NSString *info = alert.informativeText ?: @"";
 
-    // TickTick 8.2.x localizes this alert through Localizable.strings into
-    // 40+ languages (verified against the official 8.2.10 (921) DMG). The
-    // old exact-English comparison stopped working the moment the app runs
-    // in any non-English locale, because the swizzle never recognizes the
-    // alert and the piracy popup shows up every ~20s again. Match the full
-    // set of localized titles (extracted from the 8.2.10 bundle) and keep a
-    // couple of generic fallbacks so a future locale that slips in still
-    // gets caught.
-    static NSSet<NSString *> *titles = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        titles = [NSSet setWithObjects:
-            @"Anwendung nicht lizenziert.",
-            @"Aplicació no llicenciada.",
-            @"Aplicación no autorizada",
-            @"Aplicativo não licenciado",
-            @"Aplicația nu este licențiată.",
-            @"Aplikace není licencována.",
-            @"Aplikacija ni licencirana.",
-            @"Aplikacija nije licencirana.",
-            @"Aplikasi Tidak Berlisensi.",
-            @"Aplikasi Tidak Dilisensikan",
-            @"Aplikácia nie je licencovaná.",
-            @"Application Not Licensed",
-            @"Application non licence",
-            @"Applicazione non autorizzata.",
-            @"Applikasjon ikke lisensiert",
-            @"Applikationen er ikke licenseret.",
-            @"Applikationen är inte licensierad.",
-            @"Az alkalmazás nincs engedélyezve.",
-            @"Ostrzeżenie o nielegalnej kopii aplikacji",
-            @"Programa neleisti.",
-            @"Programma nav licencēta.",
-            @"Rhybudd Dros Fersiwn Anghyfreithlon",
-            @"Sovellusta ei ole lisensoitu",
-            @"Toepassing niet gelicentieerd",
-            @"Uygulama Lisanslı Değil.",
-            @"Προειδοποίηση για παραβίαση πνευματικών δικαιωμάτων",
-            @"Попередження про порушення авторських прав.",
-            @"Праграма не ліцэнзавана",
-            @"Приложение не лицензировано",
-            @"Приложението не е лицензирано.",
-            @"אזהרת פרצות זכויות יוצרים",
-            @"برنامہ لائسنس نہیں ہے۔",
-            @"تحذير القرصنة",
-            @"هشدار قانونی نسخه‌ی غیرمجاز",
-            @"பிரதியேக உரிமை இல்லாத பயன்பாடு",
-            @"แจ้งเตือนการละเมิดลิขสิทธิ์",
-            @"Ứng dụng không được cấp phép",
-            @"ライセンスされていないアプリケーション",
-            @"盗版警告",
-            @"盜版警告",
-            @"해적판을 경고",
-            nil];
-    });
-    if ([titles containsObject:title]) {
-        return YES;
+    for (NSUInteger i = 0; kPatchZeroPiracyTitles[i] != nil; i++) {
+        if ([title isEqualToString:kPatchZeroPiracyTitles[i]]) {
+            return YES;
+        }
     }
 
     // Fallbacks: the piracy wording in the informative body plus the

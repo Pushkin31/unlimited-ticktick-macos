@@ -361,6 +361,41 @@ static void patchzero_arm_minimize_guard(double seconds) {
 
 @end
 
+// Tamper check hides windows via orderOut:/close: right after the alert
+// (log evidence: zero miniaturize: calls, visible flicker). Blocking those
+// outright provokes a 200-300ms retry storm (observed by the original
+// author), so instead: let the hide happen (the check's bookkeeping is
+// satisfied, no storm) and bring the window back on the NEXT runloop turn
+// (~ms) - the hide is invisible to the eye. Only while the guard is armed.
+@implementation NSWindow (PatchZeroInstantRestore)
+
+- (void)patched_orderOut:(id)sender {
+    if (gPatchZeroMinimizeGuardArmed
+        && [self windowNumber] != gPatchZeroSuppressedWindowNumber) {
+        NSLog(@"[PatchZero] Tamper check ordered out window %ld; restoring next runloop turn.", (long)[self windowNumber]);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self orderFront:nil];
+        });
+    }
+    [self patched_orderOut:sender];
+}
+
+- (void)patched_close:(id)sender {
+    if (gPatchZeroMinimizeGuardArmed
+        && [self windowNumber] != gPatchZeroSuppressedWindowNumber) {
+        NSLog(@"[PatchZero] Tamper check closed window %ld; restoring next runloop turn.", (long)[self windowNumber]);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self.isMiniaturized) {
+                [self deminiaturize:nil];
+            }
+            [self orderFront:nil];
+        });
+    }
+    [self patched_close:sender];
+}
+
+@end
+
 static void patchzero_install_minimize_blocker(void) {
     Class cls = [NSWindow class];
     Method orig = class_getInstanceMethod(cls, @selector(miniaturize:));
@@ -370,6 +405,22 @@ static void patchzero_install_minimize_blocker(void) {
         NSLog(@"[PatchZero] Hooked NSWindow miniaturize: (block-while-armed).");
     } else {
         NSLog(@"[PatchZero] WARNING: could not hook NSWindow miniaturize:.");
+    }
+    Method origOut = class_getInstanceMethod(cls, @selector(orderOut:));
+    Method replOut = class_getInstanceMethod(cls, @selector(patched_orderOut:));
+    if (origOut && replOut) {
+        method_exchangeImplementations(origOut, replOut);
+        NSLog(@"[PatchZero] Hooked NSWindow orderOut: (instant restore).");
+    } else {
+        NSLog(@"[PatchZero] WARNING: could not hook NSWindow orderOut:.");
+    }
+    Method origClose = class_getInstanceMethod(cls, @selector(close));
+    Method replClose = class_getInstanceMethod(cls, @selector(patched_close:));
+    if (origClose && replClose) {
+        method_exchangeImplementations(origClose, replClose);
+        NSLog(@"[PatchZero] Hooked NSWindow close (instant restore).");
+    } else {
+        NSLog(@"[PatchZero] WARNING: could not hook NSWindow close.");
     }
 }
 

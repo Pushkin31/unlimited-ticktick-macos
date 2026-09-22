@@ -146,45 +146,6 @@ static void patchzero_start_termination_block_window(void) {
 // could dangle; a window number is just a scalar and never dangles.
 static NSInteger gPatchZeroSuppressedWindowNumber = 0;
 
-// Key window number at the moment we suppressed the alert, so the reopen
-// pass can restore focus to exactly that one window instead of calling
-// makeKeyAndOrderFront on every window (which made the key window hop
-// between all windows every ~20s tamper tick: focus flicker and a dead
-// main menu bar, since menu actions route through the key window /
-// first responder chain). Stored as a scalar number, not a pointer:
-// under -fno-objc-arc a raw pointer could dangle if the window is
-// released between the alert and the reopen dispatch.
-static NSInteger gPatchZeroKeyWindowNumber = 0;
-
-static void patchzero_reopen_windows_shortly(void) {
-    NSInteger restoreKeyNumber = gPatchZeroKeyWindowNumber;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        for (NSWindow *window in [NSApplication sharedApplication].windows) {
-            // Skip the suppressed piracy alert's own (empty) window - it is
-            // created as a side effect of the alert lifecycle and would
-            // otherwise pop up blank right after we suppressed the alert.
-            if ([window windowNumber] == gPatchZeroSuppressedWindowNumber) {
-                continue;
-            }
-            // Only the previously-key window is allowed to steal key status;
-            // the rest are shown without grabbing focus. Re-keying every
-            // window (old behavior) made the key window hop around, which
-            // killed focus and the main menu bar.
-            if (restoreKeyNumber != 0 && [window windowNumber] == restoreKeyNumber) {
-                [window makeKeyAndOrderFront:nil];
-            } else {
-                [window orderFront:nil];
-            }
-        }
-        // Reactivate only if the app was already active: unconditional
-        // activateIgnoringOtherApps:YES stole focus from the user's frontmost
-        // app on every tamper tick (flicker).
-        if ([[NSApplication sharedApplication] isActive]) {
-            [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
-        }
-    });
-}
-
 // Main menu bar protection: the tamper check (or our own window juggling)
 // can leave the app's main menu cleared, which is what makes "About
 // TickTick", "Close" and every other menu item dead. Every legit menu
@@ -212,12 +173,49 @@ static NSMenu *gPatchZeroProtectedMenu = nil; // strong; set once, never release
 
 @end
 
+// Re-enable every menu item that has an action (recursively through
+// submenus). The tamper check disables items via setEnabled:NO; this is
+// called on each suppression so the menu bar comes back alive. Items
+// without actions are left untouched.
+static void patchzero_enable_menu_items(NSMenu *menu) {
+    if (menu == nil) {
+        return;
+    }
+    for (NSMenuItem *item in [menu itemArray]) {
+        if (item.hasSubmenu) {
+            patchzero_enable_menu_items(item.submenu);
+        }
+        if (item.action != NULL) {
+            item.enabled = YES;
+        }
+    }
+}
+
+// Hook setActivationPolicy: so the tamper check cannot demote the app to
+// Prohibited/Accessory (which removes the global menu bar and makes dock
+// clicks misbehave). Legit app usage of Accessory (e.g. hiding to the
+// menu bar extra) would be blocked too, but TickTick runs as a regular
+// windowed app, so pin it to Regular.
+@implementation NSApplication (PatchZeroProtectActivationPolicy)
+
+- (void)patched_setActivationPolicy:(NSApplicationActivationPolicy)policy {
+    if (policy != NSApplicationActivationPolicyRegular) {
+        NSLog(@"[PatchZero] Blocked setActivationPolicy:%ld (tamper check), keeping Regular.", (long)policy);
+        policy = NSApplicationActivationPolicyRegular;
+    }
+    [self patched_setActivationPolicy:policy];
+}
+
+@end
+
 static void patchzero_install_menu_protection(void) {
     Class cls = [NSApplication class];
-    Method orig = class_getInstanceMethod(cls, @selector(setMainMenu:));
-    Method repl = class_getInstanceMethod(cls, @selector(patched_setMainMenu:));
-    if (orig && repl) {
-        method_exchangeImplementations(orig, repl);
+    Method origMainMenu = class_getInstanceMethod(cls, @selector(setMainMenu:));
+    Method replMainMenu = class_getInstanceMethod(cls, @selector(patched_setMainMenu:));
+    Method origPolicy = class_getInstanceMethod(cls, @selector(setActivationPolicy:));
+    Method replPolicy = class_getInstanceMethod(cls, @selector(patched_setActivationPolicy:));
+    if (origMainMenu && replMainMenu) {
+        method_exchangeImplementations(origMainMenu, replMainMenu);
         // Seed the protected menu with whatever the app has right now.
         if (gPatchZeroProtectedMenu == nil) {
             gPatchZeroProtectedMenu = [[NSApplication sharedApplication].mainMenu retain];
@@ -226,7 +224,109 @@ static void patchzero_install_menu_protection(void) {
     } else {
         NSLog(@"[PatchZero] WARNING: could not hook setMainMenu:.");
     }
+    if (origPolicy && replPolicy) {
+        method_exchangeImplementations(origPolicy, replPolicy);
+        NSLog(@"[PatchZero] Hooked setActivationPolicy: (pinned to Regular).");
+    } else {
+        NSLog(@"[PatchZero] WARNING: could not hook setActivationPolicy:.");
+    }
 }
+
+// Key window number at the moment we suppressed the alert, so the reopen
+// pass can restore focus to exactly that one window instead of calling
+// makeKeyAndOrderFront on every window (which made the key window hop
+// between all windows every ~20s tamper tick: focus flicker and a dead
+// main menu bar, since menu actions route through the key window /
+// first responder chain). Stored as a scalar number, not a pointer:
+// under -fno-objc-arc a raw pointer could dangle if the window is
+// released between the alert and the reopen dispatch.
+static NSInteger gPatchZeroKeyWindowNumber = 0;
+
+// Rolling snapshot of window numbers that are actually visible and not
+// miniaturized, refreshed every 0.5s. The reopen pass below uses this to
+// distinguish "windows the tamper check just hid" (show them again) from
+// "windows the user closed/minimized on purpose" (leave them alone).
+#define kPatchZeroMaxTrackedWindows 64
+static NSInteger gPatchZeroTrackedWindowNumbers[kPatchZeroMaxTrackedWindows];
+static int gPatchZeroTrackedWindowCount = 0;
+
+static void patchzero_snapshot_visible_windows(void) {
+    gPatchZeroTrackedWindowCount = 0;
+    for (NSWindow *window in [NSApplication sharedApplication].windows) {
+        if (!window.isVisible || window.isMiniaturized) {
+            continue;
+        }
+        if (gPatchZeroTrackedWindowCount >= kPatchZeroMaxTrackedWindows) {
+            break;
+        }
+        gPatchZeroTrackedWindowNumbers[gPatchZeroTrackedWindowCount++] = window.windowNumber;
+    }
+}
+
+static BOOL patchzero_is_window_number_tracked(NSInteger windowNumber) {
+    for (int i = 0; i < gPatchZeroTrackedWindowCount; i++) {
+        if (gPatchZeroTrackedWindowNumbers[i] == windowNumber) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static void patchzero_restore_activation_and_menu(void) {
+    NSApplication *app = [NSApplication sharedApplication];
+    if (app.activationPolicy != NSApplicationActivationPolicyRegular) {
+        NSLog(@"[PatchZero] Tamper check left app non-regular activation policy, restoring.");
+        app.activationPolicy = NSApplicationActivationPolicyRegular;
+    }
+    if (gPatchZeroProtectedMenu != nil && app.mainMenu != gPatchZeroProtectedMenu) {
+        NSLog(@"[PatchZero] Main menu was swapped out, restoring captured menu.");
+        [app setMainMenu:gPatchZeroProtectedMenu];
+    }
+    patchzero_enable_menu_items(gPatchZeroProtectedMenu);
+}
+
+static void patchzero_reopen_windows_shortly(void) {
+    NSInteger restoreKeyNumber = gPatchZeroKeyWindowNumber;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        patchzero_restore_activation_and_menu();
+        for (NSWindow *window in [NSApplication sharedApplication].windows) {
+            // Skip the suppressed piracy alert's own (empty) window - it is
+            // created as a side effect of the alert lifecycle and would
+            // otherwise pop up blank right after we suppressed the alert.
+            if ([window windowNumber] == gPatchZeroSuppressedWindowNumber) {
+                continue;
+            }
+            // Windows the user minimized (dock icon / yellow button) stay
+            // minimized; never force them back up.
+            if (window.isMiniaturized) {
+                continue;
+            }
+            // Only windows that were actually visible before the tamper tick
+            // get re-shown. Closed windows (e.g. the premium page the user
+            // dismissed) are still referenced by the app and would otherwise
+            // pop back up every ~20s.
+            if (!patchzero_is_window_number_tracked(window.windowNumber)) {
+                continue;
+            }
+            // Only the previously-key window is allowed to steal key status;
+            // the rest are shown without grabbing focus. Re-keying every
+            // window (old behavior) made the key window hop around, which
+            // killed focus and the main menu bar.
+            if (restoreKeyNumber != 0 && [window windowNumber] == restoreKeyNumber) {
+                [window makeKeyAndOrderFront:nil];
+            } else {
+                [window orderFront:nil];
+            }
+        }
+        // Reactivate only if the app was already active: unconditional
+        // activateIgnoringOtherApps:YES stole focus from the user's frontmost
+        // app on every tamper tick (flicker).
+        if ([[NSApplication sharedApplication] isActive]) {
+            [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+        }
+    });
+}
+
 @interface NSAlert (PatchZeroWindowAccess)
 - (NSWindow *)window;
 @end
@@ -698,6 +798,14 @@ static void patch_init() {
     // runs before NSApplicationMain, so defer briefly.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         patchzero_install_quit_safety_valve();
-        NSLog(@"[PatchZero] Installed Cmd+Q safety valve.");
+        // Seed window snapshot, then keep it fresh every 0.5s so the reopen
+        // pass can tell "tamper-check-hid" windows from "user closed them".
+        patchzero_snapshot_visible_windows();
+        [NSTimer scheduledTimerWithTimeInterval:0.5
+                                         repeats:YES
+                                           block:^(NSTimer *timer) {
+            patchzero_snapshot_visible_windows();
+        }];
+        NSLog(@"[PatchZero] Installed Cmd+Q safety valve + window snapshot timer.");
     });
 }

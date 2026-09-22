@@ -296,14 +296,14 @@ static void patchzero_reopen_windows_shortly(void) {
             // tamper tick get re-shown (user-closed windows fall out of the
             // snapshot). If the snapshot is still empty (very first tamper
             // tick arrives before the 0.5s snapshot timer has run), fall
-            // back to re-showing every still-visible window - minimized
-            // windows report isVisible=YES, closed ones NO, so this
-            // distinguishes "check hid it" from "user closed it" without
-            // the snapshot.
+            // back to re-showing every window that is either still visible
+            // or minimized - minimize() does not always leave isVisible=YES
+            // so both flags are checked; only fully closed windows (both
+            // NO) are left alone.
             if (!snapshotEmpty && !patchzero_is_window_number_tracked(window.windowNumber)) {
                 continue;
             }
-            if (snapshotEmpty && !window.isVisible) {
+            if (snapshotEmpty && !window.isVisible && !window.isMiniaturized) {
                 continue;
             }
             // The tamper check minimizes windows it hides. Bring them back
@@ -326,6 +326,44 @@ static void patchzero_reopen_windows_shortly(void) {
             [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
         }
     });
+}
+
+// Minimization guard: the tamper check minimizes the main window
+// asynchronously (often AFTER our 0.4s reopen has already run), so the
+// window ends up collapsed on first launch with no reopen scheduled for
+// ~20s. While the guard is armed, any window that gets miniaturized is
+// immediately restored. Armed right after each alert suppression (the
+// check minimizes right after it alerts) and for the first seconds after
+// launch.
+static volatile BOOL gPatchZeroMinimizeGuardArmed = NO;
+
+static void patchzero_arm_minimize_guard(double seconds) {
+    gPatchZeroMinimizeGuardArmed = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        gPatchZeroMinimizeGuardArmed = NO;
+    });
+}
+
+static void patchzero_install_minimize_guard(void) {
+    [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidMiniaturizeNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification *note) {
+        if (!gPatchZeroMinimizeGuardArmed) {
+            return;
+        }
+        NSWindow *window = [note object];
+        if (![window isKindOfClass:[NSWindow class]] || !window.isMiniaturized) {
+            return;
+        }
+        if ([window windowNumber] == gPatchZeroSuppressedWindowNumber) {
+            return; // still the alert's own window; let it be
+        }
+        NSLog(@"[PatchZero] Minimize guard: restoring window %ld minimized by tamper check.", (long)[window windowNumber]);
+        [window deminiaturize:nil];
+        [window orderFront:nil];
+    }];
+    NSLog(@"[PatchZero] Installed window minimize guard.");
 }
 
 @interface NSAlert (PatchZeroWindowAccess)
@@ -360,6 +398,7 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Download TickTick.");
         patchzero_hide_suppressed_alert_window(self);
         patchzero_start_termination_block_window();
+        patchzero_arm_minimize_guard(3.0);
         patchzero_reopen_windows_shortly();
         return NSAlertFirstButtonReturn;
     }
@@ -371,6 +410,7 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Download TickTick.");
         patchzero_hide_suppressed_alert_window(self);
         patchzero_start_termination_block_window();
+        patchzero_arm_minimize_guard(3.0);
         patchzero_reopen_windows_shortly();
         if (handler) {
             handler(NSAlertFirstButtonReturn);
@@ -797,6 +837,11 @@ static void patch_init() {
     // runs before NSApplicationMain, so defer briefly.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         patchzero_install_quit_safety_valve();
+        // Minimize guard for first launch: armed for 8s (the user cannot
+        // physically minimize anything meaningful in that window; the first
+        // tamper ticks land here).
+        patchzero_install_minimize_guard();
+        patchzero_arm_minimize_guard(8.0);
         // Seed window snapshot, then keep it fresh every 0.5s so the reopen
         // pass can tell "tamper-check-hid" windows from "user closed them".
         patchzero_snapshot_visible_windows();

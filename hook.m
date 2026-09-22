@@ -12,8 +12,90 @@
 // alert - regardless of what triggers it - has to go through NSAlert's
 // presentation methods to ever become visible.
 static BOOL patchzero_alert_is_piracy_warning(NSAlert *alert) {
-    return [alert.messageText isEqualToString:@"Application Not Licensed"]
-        || [alert.informativeText containsString:@"pirated TickTick application"];
+    NSString *title = alert.messageText ?: @"";
+    NSString *info = alert.informativeText ?: @"";
+
+    // TickTick 8.2.x localizes this alert through Localizable.strings into
+    // 40+ languages (verified against the official 8.2.10 (921) DMG). The
+    // old exact-English comparison stopped working the moment the app runs
+    // in any non-English locale, because the swizzle never recognizes the
+    // alert and the piracy popup shows up every ~20s again. Match the full
+    // set of localized titles (extracted from the 8.2.10 bundle) and keep a
+    // couple of generic fallbacks so a future locale that slips in still
+    // gets caught.
+    static NSSet<NSString *> *titles = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        titles = [NSSet setWithObjects:
+            @"Anwendung nicht lizenziert.",
+            @"Aplicació no llicenciada.",
+            @"Aplicación no autorizada",
+            @"Aplicativo não licenciado",
+            @"Aplicația nu este licențiată.",
+            @"Aplikace není licencována.",
+            @"Aplikacija ni licencirana.",
+            @"Aplikacija nije licencirana.",
+            @"Aplikasi Tidak Berlisensi.",
+            @"Aplikasi Tidak Dilisensikan",
+            @"Aplikácia nie je licencovaná.",
+            @"Application Not Licensed",
+            @"Application non licence",
+            @"Applicazione non autorizzata.",
+            @"Applikasjon ikke lisensiert",
+            @"Applikationen er ikke licenseret.",
+            @"Applikationen är inte licensierad.",
+            @"Az alkalmazás nincs engedélyezve.",
+            @"Ostrzeżenie o nielegalnej kopii aplikacji",
+            @"Programa neleisti.",
+            @"Programma nav licencēta.",
+            @"Rhybudd Dros Fersiwn Anghyfreithlon",
+            @"Sovellusta ei ole lisensoitu",
+            @"Toepassing niet gelicentieerd",
+            @"Uygulama Lisanslı Değil.",
+            @"Προειδοποίηση για παραβίαση πνευματικών δικαιωμάτων",
+            @"Попередження про порушення авторських прав.",
+            @"Праграма не ліцэнзавана",
+            @"Приложение не лицензировано",
+            @"Приложението не е лицензирано.",
+            @"אזהרת פרצות זכויות יוצרים",
+            @"برنامہ لائسنس نہیں ہے۔",
+            @"تحذير القرصنة",
+            @"هشدار قانونی نسخه‌ی غیرمجاز",
+            @"பிரதியேக உரிமை இல்லாத பயன்பாடு",
+            @"แจ้งเตือนการละเมิดลิขสิทธิ์",
+            @"Ứng dụng không được cấp phép",
+            @"ライセンスされていないアプリケーション",
+            @"盗版警告",
+            @"盜版警告",
+            @"해적판을 경고",
+            nil];
+    });
+    if ([titles containsObject:title]) {
+        return YES;
+    }
+
+    // Fallbacks: the piracy wording in the informative body plus the
+    // "Download TickTick" button are the two distinguishing features of this
+    // alert. Cover the Latin/Cyrillic/CJK keywords present in 8.2.10.
+    NSString *lowerTitle = title.lowercaseString;
+    NSString *lowerInfo = info.lowercaseString;
+    BOOL mentionsTickTickInInfo = [lowerInfo containsString:@"ticktick"];
+    BOOL piracyKeyword = [lowerInfo containsString:@"pirat"]
+        || [lowerInfo containsString:@"пират"]
+        || [lowerInfo containsString:@"raubkopiert"]
+        || [lowerInfo containsString:@"bajak"]
+        || [lowerInfo containsString:@"illegal"]
+        || [lowerInfo containsString:@"nelegal"]
+        || [lowerInfo containsString:@"盗版"]
+        || [lowerInfo containsString:@"海賊"]
+        || [lowerInfo containsString:@"해적"]
+        || [lowerTitle containsString:@"licens"]
+        || [lowerTitle containsString:@"лицензирован"];
+    if (mentionsTickTickInInfo && piracyKeyword) {
+        return YES;
+    }
+
+    return NO;
 }
 
 // Answering either button on the alert (verified by hand for Cancel, and by
@@ -52,13 +134,46 @@ static void patchzero_start_termination_block_window(void) {
 // So instead: let close/orderOut proceed normally (satisfies whatever the
 // check's own bookkeeping expects, avoiding the retry storm) and re-show the
 // window a moment afterward.
+// Window of the last suppressed piracy alert, kept so the reopen pass below
+// does not raise an empty NSAlert window over the app's real UI. Declared
+// before first use (C order requirement).
+static __weak NSWindow *gPatchZeroSuppressedAlertWindow = nil;
+
 static void patchzero_reopen_windows_shortly(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         for (NSWindow *window in [NSApplication sharedApplication].windows) {
+            // Skip the suppressed piracy alert's own (empty) window - it is
+            // created as a side effect of the alert lifecycle and would
+            // otherwise pop up blank right after we suppressed the alert.
+            if (window == gPatchZeroSuppressedAlertWindow) {
+                continue;
+            }
             [window makeKeyAndOrderFront:nil];
         }
         [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
     });
+}
+
+// NSAlert's -window is private API in the SDK headers but is present at
+// runtime; declare it locally so we can hide the empty alert window. If it
+// ever goes away the guard below simply leaves the window alone.
+@interface NSAlert (PatchZeroWindowAccess)
+- (NSWindow *)window;
+@end
+
+static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
+    NSWindow *alertWindow = nil;
+    if ([alert respondsToSelector:@selector(window)]) {
+        @try {
+            alertWindow = [alert window];
+        } @catch (NSException *exception) {
+            alertWindow = nil;
+        }
+    }
+    if (alertWindow) {
+        [alertWindow orderOut:nil];
+        gPatchZeroSuppressedAlertWindow = alertWindow;
+    }
 }
 
 // Confirmed by hand: clicking "Cancel" on this alert quits the app outright.
@@ -72,6 +187,7 @@ static void patchzero_reopen_windows_shortly(void) {
 - (NSModalResponse)patched_runModal {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Download TickTick.");
+        patchzero_hide_suppressed_alert_window(self);
         patchzero_start_termination_block_window();
         patchzero_reopen_windows_shortly();
         return NSAlertFirstButtonReturn;
@@ -82,6 +198,7 @@ static void patchzero_reopen_windows_shortly(void) {
 - (void)patched_beginSheetModalForWindow:(NSWindow *)sheetWindow completionHandler:(void (^)(NSModalResponse returnCode))handler {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Download TickTick.");
+        patchzero_hide_suppressed_alert_window(self);
         patchzero_start_termination_block_window();
         patchzero_reopen_windows_shortly();
         if (handler) {

@@ -296,17 +296,20 @@ static void patchzero_reopen_windows_shortly(void) {
             if ([window windowNumber] == gPatchZeroSuppressedWindowNumber) {
                 continue;
             }
-            // Windows the user minimized (dock icon / yellow button) stay
-            // minimized; never force them back up.
-            if (window.isMiniaturized) {
-                continue;
-            }
-            // Only windows that were actually visible before the tamper tick
-            // get re-shown. Closed windows (e.g. the premium page the user
-            // dismissed) are still referenced by the app and would otherwise
-            // pop back up every ~20s.
+            // Only windows that were actually visible right before the
+            // tamper tick get re-shown. Windows the user closed (e.g. the
+            // premium page they dismissed) are still referenced by the app
+            // and would otherwise pop back up every ~20s.
             if (!patchzero_is_window_number_tracked(window.windowNumber)) {
                 continue;
+            }
+            // The tamper check minimizes windows it hides. A tracked window
+            // that is currently minimized was minimized BY THE CHECK (the
+            // user-only minimization path drops out of the snapshot after
+            // 0.5s), so bring it back out of the Dock instead of leaving it
+            // collapsed on first launch.
+            if (window.isMiniaturized) {
+                [window deminiaturize:nil];
             }
             // Only the previously-key window is allowed to steal key status;
             // the rest are shown without grabbing focus. Re-keying every

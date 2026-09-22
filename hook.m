@@ -232,16 +232,6 @@ static void patchzero_install_menu_protection(void) {
     }
 }
 
-// Key window number at the moment we suppressed the alert, so the reopen
-// pass can restore focus to exactly that one window instead of calling
-// makeKeyAndOrderFront on every window (which made the key window hop
-// between all windows every ~20s tamper tick: focus flicker and a dead
-// main menu bar, since menu actions route through the key window /
-// first responder chain). Stored as a scalar number, not a pointer:
-// under -fno-objc-arc a raw pointer could dangle if the window is
-// released between the alert and the reopen dispatch.
-static NSInteger gPatchZeroKeyWindowNumber = 0;
-
 // Rolling snapshot of window numbers that are actually visible and not
 // miniaturized, refreshed every 0.5s. The reopen pass below uses this to
 // distinguish "windows the tamper check just hid" (show them again) from
@@ -286,9 +276,15 @@ static void patchzero_restore_activation_and_menu(void) {
 }
 
 static void patchzero_reopen_windows_shortly(void) {
-    NSInteger restoreKeyNumber = gPatchZeroKeyWindowNumber;
+    BOOL snapshotEmpty = (gPatchZeroTrackedWindowCount == 0);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         patchzero_restore_activation_and_menu();
+        // The tamper check can hide the whole app (NSApp hide:) instead of
+        // just windows; bring it back so the UI actually reappears.
+        if ([[NSApplication sharedApplication] isHidden]) {
+            NSLog(@"[PatchZero] App hidden by tamper check, unhiding.");
+            [[NSApplication sharedApplication] unhide:nil];
+        }
         for (NSWindow *window in [NSApplication sharedApplication].windows) {
             // Skip the suppressed piracy alert's own (empty) window - it is
             // created as a side effect of the alert lifecycle and would
@@ -296,30 +292,32 @@ static void patchzero_reopen_windows_shortly(void) {
             if ([window windowNumber] == gPatchZeroSuppressedWindowNumber) {
                 continue;
             }
-            // Only windows that were actually visible right before the
-            // tamper tick get re-shown. Windows the user closed (e.g. the
-            // premium page they dismissed) are still referenced by the app
-            // and would otherwise pop back up every ~20s.
-            if (!patchzero_is_window_number_tracked(window.windowNumber)) {
+            // Normal path: only windows that were visible right before the
+            // tamper tick get re-shown (user-closed windows fall out of the
+            // snapshot). If the snapshot is still empty (very first tamper
+            // tick arrives before the 0.5s snapshot timer has run), fall
+            // back to re-showing every still-visible window - minimized
+            // windows report isVisible=YES, closed ones NO, so this
+            // distinguishes "check hid it" from "user closed it" without
+            // the snapshot.
+            if (!snapshotEmpty && !patchzero_is_window_number_tracked(window.windowNumber)) {
                 continue;
             }
-            // The tamper check minimizes windows it hides. A tracked window
-            // that is currently minimized was minimized BY THE CHECK (the
-            // user-only minimization path drops out of the snapshot after
-            // 0.5s), so bring it back out of the Dock instead of leaving it
-            // collapsed on first launch.
+            if (snapshotEmpty && !window.isVisible) {
+                continue;
+            }
+            // The tamper check minimizes windows it hides. Bring them back
+            // out of the Dock instead of leaving them collapsed on first
+            // launch.
             if (window.isMiniaturized) {
                 [window deminiaturize:nil];
             }
-            // Only the previously-key window is allowed to steal key status;
-            // the rest are shown without grabbing focus. Re-keying every
-            // window (old behavior) made the key window hop around, which
-            // killed focus and the main menu bar.
-            if (restoreKeyNumber != 0 && [window windowNumber] == restoreKeyNumber) {
-                [window makeKeyAndOrderFront:nil];
-            } else {
-                [window orderFront:nil];
-            }
+            // Show without touching the key window: makeKeyAndOrderFront
+            // here stole focus from a window the user just opened (e.g. the
+            // premium page - the alert is intercepted before that window
+            // becomes key, and the deferred reopen then yanks focus back to
+            // the previously-key one).
+            [window orderFront:nil];
         }
         // Reactivate only if the app was already active: unconditional
         // activateIgnoringOtherApps:YES stole focus from the user's frontmost
@@ -361,7 +359,6 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Download TickTick.");
         patchzero_hide_suppressed_alert_window(self);
-        gPatchZeroKeyWindowNumber = [NSApplication sharedApplication].keyWindow.windowNumber;
         patchzero_start_termination_block_window();
         patchzero_reopen_windows_shortly();
         return NSAlertFirstButtonReturn;
@@ -373,7 +370,6 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Download TickTick.");
         patchzero_hide_suppressed_alert_window(self);
-        gPatchZeroKeyWindowNumber = [NSApplication sharedApplication].keyWindow.windowNumber;
         patchzero_start_termination_block_window();
         patchzero_reopen_windows_shortly();
         if (handler) {

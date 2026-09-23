@@ -89,19 +89,61 @@ static BOOL patchzero_alert_is_piracy_warning(NSAlert *alert) {
     return mentionsTickTickInInfo && piracyKeyword;
 }
 
-// On 8.2.20 the tamper check shows the alert and pings the App Store URL, but
-// it does NOT call -[NSApplication terminate:] and does NOT close the window
-// (no window-close or terminate events appear in the log across a full session).
-// So there is nothing to block or restore — the 8.0.80/8.2.10-era termination
-// block and window reopen are removed. They were eating Cmd+Q (the 2s block
-// window) and calling activateIgnoringOtherApps (launch flicker + focus loss on
-// premium/settings sheets).
+// On 8.2.20 the tamper check shows the alert, pings the App Store URL, AND
+// quietly hides/miniaturizes the app (the "AI assistant" onboarding window it
+// shows first is a red herring — the app is already being folded into the Dock
+// by the tamper check to clear the screen for the App Store). We suppress the
+// alert and the URL, but must also swallow the hide/miniaturize/orderOut that
+// immediately follows, for a short window, then let normal window operations
+// work again so the user can still minimize/close windows on demand.
+
+static volatile BOOL patchzero_block_window_ops = NO;
+
+static void patchzero_start_window_op_block(void) {
+    patchzero_block_window_ops = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        patchzero_block_window_ops = NO;
+    });
+}
+
+@implementation NSApplication (PatchZeroBlockTamperHide)
+
+- (void)patched_hide:(id)sender {
+    if (patchzero_block_window_ops) {
+        NSLog(@"[PatchZero] Blocked app hide: (post-tamper-check window).");
+        return;
+    }
+    [self patched_hide:sender];
+}
+
+@end
+
+@implementation NSWindow (PatchZeroBlockTamperOrderOut)
+
+- (void)patched_miniaturize:(id)sender {
+    if (patchzero_block_window_ops) {
+        NSLog(@"[PatchZero] Blocked window miniaturize (class %@) (post-tamper-check window).", NSStringFromClass([self class]));
+        return;
+    }
+    [self patched_miniaturize:sender];
+}
+
+- (void)patched_orderOut:(id)sender {
+    if (patchzero_block_window_ops) {
+        NSLog(@"[PatchZero] Blocked window orderOut (class %@) (post-tamper-check window).", NSStringFromClass([self class]));
+        return;
+    }
+    [self patched_orderOut:sender];
+}
+
+@end
 
 @implementation NSAlert (PatchZeroSuppressPiracyWarning)
 
 - (NSModalResponse)patched_runModal {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Download TickTick.");
+        patchzero_start_window_op_block();
         return NSAlertFirstButtonReturn;
     }
     return [self patched_runModal];
@@ -110,6 +152,7 @@ static BOOL patchzero_alert_is_piracy_warning(NSAlert *alert) {
 - (void)patched_beginSheetModalForWindow:(NSWindow *)sheetWindow completionHandler:(void (^)(NSModalResponse returnCode))handler {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Download TickTick.");
+        patchzero_start_window_op_block();
         if (handler) {
             handler(NSAlertFirstButtonReturn);
         }
@@ -185,6 +228,25 @@ static void patchzero_install_piracy_warning_suppression(void) {
     Method patchedOpenURL = class_getInstanceMethod(workspaceCls, @selector(patched_openURL:));
     if (originalOpenURL && patchedOpenURL) {
         method_exchangeImplementations(originalOpenURL, patchedOpenURL);
+    }
+
+    Class appCls = [NSApplication class];
+    Method originalHide = class_getInstanceMethod(appCls, @selector(hide:));
+    Method patchedHide = class_getInstanceMethod(appCls, @selector(patched_hide:));
+    if (originalHide && patchedHide) {
+        method_exchangeImplementations(originalHide, patchedHide);
+    }
+
+    Class winCls = [NSWindow class];
+    Method originalMini = class_getInstanceMethod(winCls, @selector(miniaturize:));
+    Method patchedMini = class_getInstanceMethod(winCls, @selector(patched_miniaturize:));
+    if (originalMini && patchedMini) {
+        method_exchangeImplementations(originalMini, patchedMini);
+    }
+    Method originalOrderOut = class_getInstanceMethod(winCls, @selector(orderOut:));
+    Method patchedOrderOut = class_getInstanceMethod(winCls, @selector(patched_orderOut:));
+    if (originalOrderOut && patchedOrderOut) {
+        method_exchangeImplementations(originalOrderOut, patchedOrderOut);
     }
 
     NSLog(@"[PatchZero] Hooked NSAlert to suppress the piracy warning.");

@@ -715,7 +715,19 @@ static void patchzero_install_json_patch(void) {
 // libsqlite3's C API to load rows. This makes isPro effectively immutable
 // from the app's point of view: whatever gets written, every read comes back
 // patched.
+// DIAGNOSTIC: disabled so we can bisect the "tasks not rendering on folder
+// switch" bug. The sqlite interpose rewrites column TYPES/VALUES on every
+// local-DB read (folder lists are read from the local store, not the wire,
+// so the JSON patch above never sees them). If Core Data gets a wrong column
+// type for a date/null column, row drawing stalls exactly like the reported
+// symptom. Force this matcher to always miss -> the whole sqlite layer is a
+// no-op -> premium dates come from the JSON patch only for this test.
+static BOOL patchzero_sqlite_patch_disabled = YES;
+
 static BOOL patchzero_column_name_is_one_of(sqlite3_stmt *stmt, int col, NSArray<NSString *> *names) {
+    if (patchzero_sqlite_patch_disabled) {
+        return NO;
+    }
     const char *rawName = sqlite3_column_name(stmt, col);
     if (!rawName) {
         return NO;

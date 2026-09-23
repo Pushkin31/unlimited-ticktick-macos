@@ -741,14 +741,6 @@ static NSArray<NSString *> *patchzero_pro_bool_columns(void) {
     return @[@"ZISPRO", @"ZISTEAMPRO", @"ZISACTIVETEAMUSER", @"isPro", @"isTeamPro", @"isActiveTeamUser"];
 }
 
-static NSArray<NSString *> *patchzero_pro_date_columns(void) {
-    return @[@"ZPROENDDATE", @"ZVIPENDDATE", @"proEndDate", @"vipEndDate"];
-}
-
-// Core Data's Cocoa-reference-date epoch (2001-01-01), matching how
-// TTUser.proEndDate is stored as a REAL column in the sqlite store.
-static const double kPatchZeroForcedProEndDateReferenceSeconds = 3092601600.0; // ~2098-12-13
-
 // Calling the real symbol by name here is intentional and safe: dyld's
 // __interpose mechanism only rewrites bindings in OTHER images that import
 // these symbols, not references from within this same dylib. Routing through
@@ -770,9 +762,13 @@ sqlite3_int64 patchzero_sqlite3_column_int64(sqlite3_stmt *stmt, int col) {
 }
 
 double patchzero_sqlite3_column_double(sqlite3_stmt *stmt, int col) {
-    if (patchzero_column_name_is_one_of(stmt, col, patchzero_pro_date_columns())) {
-        return kPatchZeroForcedProEndDateReferenceSeconds;
-    }
+    // Intentionally NOT patched: forcing proEndDate to a constant here is the
+    // bug. The task-list fetch is a JOIN against the user table (to gate
+    // premium UI), so proEndDate is a column of EVERY task row; rewriting its
+    // value to 3092601600 produced corrupt rows and made task rendering break
+    // on folder switch / sync ("tasks present but not rendered"). isPro (the
+    // real premium gate) still comes through column_int above, so leave dates
+    // untouched.
     return sqlite3_column_double(stmt, col);
 }
 

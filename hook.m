@@ -146,6 +146,13 @@ static void patchzero_start_termination_block_window(void) {
 // could dangle; a window number is just a scalar and never dangles.
 static NSInteger gPatchZeroSuppressedWindowNumber = 0;
 
+// Key window number captured at suppression time, so the restore pass can
+// return key status to exactly the window that had it before the tamper
+// tick. Stored as a scalar (not a pointer) to stay MRC-safe: a raw NSWindow
+// pointer captured outside a retain would dangle if the window is released
+// between the alert and the restore.
+static NSInteger gPatchZeroKeyWindowNumber = 0;
+
 // Main menu bar protection: the tamper check (or our own window juggling)
 // can leave the app's main menu cleared, which is what makes "About
 // TickTick", "Close" and every other menu item dead. Every legit menu
@@ -262,6 +269,21 @@ static BOOL patchzero_is_window_number_tracked(NSInteger windowNumber) {
     return NO;
 }
 
+// Return key status to the window that held it just before the tamper tick.
+// makeKeyWindow (NOT makeKeyAndOrderFront, NOT activateIgnoringOtherApps)
+// re-keys without re-ordering and without stealing focus from any other
+// application; the isActive guard means a background tamper tick can never
+// yank focus to the front. This is what fixes the "focus goes to an
+// invisible window" symptom: orderFront: re-shows the window but leaves it
+// unkeyed, so the app ends up with a visible window and no key window.
+static void patchzero_restore_key_window(NSWindow *window) {
+    if (gPatchZeroKeyWindowNumber != 0
+        && [window windowNumber] == gPatchZeroKeyWindowNumber
+        && [[NSApplication sharedApplication] isActive]) {
+        [window makeKeyWindow];
+    }
+}
+
 static void patchzero_restore_activation_and_menu(void) {
     NSApplication *app = [NSApplication sharedApplication];
     if (app.activationPolicy != NSApplicationActivationPolicyRegular) {
@@ -318,6 +340,7 @@ static void patchzero_reopen_windows_shortly(void) {
             // becomes key, and the deferred reopen then yanks focus back to
             // the previously-key one).
             [window orderFront:nil];
+            patchzero_restore_key_window(window);
         }
         // Reactivate only if the app was already active: unconditional
         // activateIgnoringOtherApps:YES stole focus from the user's frontmost
@@ -385,6 +408,7 @@ static void patchzero_arm_minimize_guard(double seconds) {
         NSLog(@"[PatchZero] Tamper check ordered out window %ld; restoring same turn.", (long)[self windowNumber]);
         [self patched_orderOut:sender];
         [self orderFront:nil];
+        patchzero_restore_key_window(self);
         return;
     }
     [self patched_orderOut:sender];
@@ -401,6 +425,7 @@ static void patchzero_arm_minimize_guard(double seconds) {
             [self deminiaturize:nil];
         }
         [self orderFront:nil];
+        patchzero_restore_key_window(self);
         return;
     }
     [self patched_close:sender];
@@ -491,6 +516,8 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
         patchzero_hide_suppressed_alert_window(self);
         patchzero_start_termination_block_window();
         patchzero_arm_minimize_guard(3.0);
+        NSWindow *kw = [NSApplication sharedApplication].keyWindow;
+        gPatchZeroKeyWindowNumber = kw ? kw.windowNumber : 0;
         patchzero_reopen_windows_shortly();
         return NSAlertFirstButtonReturn;
     }
@@ -503,6 +530,8 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
         patchzero_hide_suppressed_alert_window(self);
         patchzero_start_termination_block_window();
         patchzero_arm_minimize_guard(3.0);
+        NSWindow *kw = [NSApplication sharedApplication].keyWindow;
+        gPatchZeroKeyWindowNumber = kw ? kw.windowNumber : 0;
         patchzero_reopen_windows_shortly();
         if (handler) {
             handler(NSAlertFirstButtonReturn);

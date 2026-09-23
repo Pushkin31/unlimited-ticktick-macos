@@ -89,62 +89,19 @@ static BOOL patchzero_alert_is_piracy_warning(NSAlert *alert) {
     return mentionsTickTickInInfo && piracyKeyword;
 }
 
-// Answering either button on the alert (verified by hand for Cancel, and by
-// log for "Download TickTick" - no crash report either time, just a clean
-// exit) is followed by the app quitting on its own shortly after. That means
-// this isn't the alert's response causing it - something unconditionally
-// terminates the process once the tamper check has run, regardless of what
-// the user chooses. Block termination for a short window after we see the
-// alert so that call fails silently instead, then let it work normally again
-// so a real user quit (Cmd+Q, Dock menu) still works.
-static volatile BOOL patchzero_block_termination = NO;
-
-static void patchzero_start_termination_block_window(void) {
-    patchzero_block_termination = YES;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        patchzero_block_termination = NO;
-    });
-}
-
-// The tamper check closes/hides every window as part of its own shutdown
-// sequence before calling terminate:, which we block. Restore only the app's
-// PRIMARY window afterward — not every window in the list. Reordering every
-// window to the front was what surfaced TickTick 8.2.20's stray premium/utility
-// panels (the random vertical/horizontal windows) every tamper-check cycle.
-static void patchzero_reopen_windows_shortly(void) {
-    NSWindow *mainWindow = [[NSApplication sharedApplication] mainWindow]
-                         ?: [[NSApplication sharedApplication] keyWindow];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (mainWindow) {
-            [mainWindow makeKeyAndOrderFront:nil];
-        }
-        [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
-    });
-}
-
-// One-time diagnostic: report what non-primary windows are visible so we can
-// identify the stray panels if they still appear. Bounded — runs only on the
-// first few peri-tamper-check ticks.
-static void patchzero_log_stray_windows(void) {
-    static int ticks = 0;
-    if (++ticks > 3) return;
-    for (NSWindow *w in [NSApplication sharedApplication].windows) {
-        if (![w isVisible]) continue;
-        NSWindow *mainW = [[NSApplication sharedApplication] mainWindow];
-        if (w == mainW) continue;
-        NSLog(@"[PatchZero] visible window: class=%@ title=%@ frame=%@",
-              NSStringFromClass([w class]), w.title ?: @"<nil>", NSStringFromRect(w.frame));
-    }
-}
+// On 8.2.20 the tamper check shows the alert and pings the App Store URL, but
+// it does NOT call -[NSApplication terminate:] and does NOT close the window
+// (no window-close or terminate events appear in the log across a full session).
+// So there is nothing to block or restore — the 8.0.80/8.2.10-era termination
+// block and window reopen are removed. They were eating Cmd+Q (the 2s block
+// window) and calling activateIgnoringOtherApps (launch flicker + focus loss on
+// premium/settings sheets).
 
 @implementation NSAlert (PatchZeroSuppressPiracyWarning)
 
 - (NSModalResponse)patched_runModal {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Download TickTick.");
-        patchzero_start_termination_block_window();
-        patchzero_log_stray_windows();
-        patchzero_reopen_windows_shortly();
         return NSAlertFirstButtonReturn;
     }
     return [self patched_runModal];
@@ -153,9 +110,6 @@ static void patchzero_log_stray_windows(void) {
 - (void)patched_beginSheetModalForWindow:(NSWindow *)sheetWindow completionHandler:(void (^)(NSModalResponse returnCode))handler {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Download TickTick.");
-        patchzero_start_termination_block_window();
-        patchzero_log_stray_windows();
-        patchzero_reopen_windows_shortly();
         if (handler) {
             handler(NSAlertFirstButtonReturn);
         }
@@ -166,17 +120,11 @@ static void patchzero_log_stray_windows(void) {
 
 @end
 
-@implementation NSApplication (PatchZeroBlockForcedQuit)
-
-- (void)patched_terminate:(id)sender {
-    if (patchzero_block_termination) {
-        NSLog(@"[PatchZero] Blocked an app termination request during the post-tamper-check window.");
-        return;
-    }
-    [self patched_terminate:sender];
-}
-
-@end
+// The 8.0.80/8.2.10 tamper check called -[NSApplication terminate:] after the
+// alert and had to be blocked. On 8.2.20 it no longer does (no terminate events
+// in the log), so the terminate swizzle is removed entirely — blocking it was
+// what made Cmd+Q intermittently stop working (the 2s block window eaten by the
+// periannual tamper re-runs).
 
 // Cmd+Q fallback: if the app's own quit path is broken (menu beeping, etc.),
 // force-exit a second after the keypress rather than hang.
@@ -232,13 +180,6 @@ static void patchzero_install_piracy_warning_suppression(void) {
     Method patchedOpenURL = class_getInstanceMethod(workspaceCls, @selector(patched_openURL:));
     if (originalOpenURL && patchedOpenURL) {
         method_exchangeImplementations(originalOpenURL, patchedOpenURL);
-    }
-
-    Class appCls = [NSApplication class];
-    Method originalTerminate = class_getInstanceMethod(appCls, @selector(terminate:));
-    Method patchedTerminate = class_getInstanceMethod(appCls, @selector(patched_terminate:));
-    if (originalTerminate && patchedTerminate) {
-        method_exchangeImplementations(originalTerminate, patchedTerminate);
     }
 
     NSLog(@"[PatchZero] Hooked NSAlert to suppress the piracy warning.");

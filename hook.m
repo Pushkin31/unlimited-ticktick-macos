@@ -2,6 +2,7 @@
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
 #import <sqlite3.h>
+#import <strings.h>
 
 // TickTick 8.0.80 added a runtime tamper/piracy check, independent of the
 // isPro state itself, that pops an "Application Not Licensed" NSAlert
@@ -349,6 +350,75 @@ static void patchzero_install_json_patch(void) {
     }
 }
 
+// Surgical SQLite read interpose for the user's premium flags.
+//
+// 8.2.20 hydrates the user as a Swift struct TTUserEntity and persists it to
+// the GRDB store table ZTTUSER. The premium gate reads isPro from that LOCAL
+// row, not from the profile JSON — the server's 8.2.20 profile response no
+// longer carries an isPro key at all (only proEndDate=1970 for free accounts),
+// so no amount of wire patching flips it. We force the boolean premium columns
+// (and the proEndDate timestamp) on every read of the user row, which keeps
+// isPro true regardless of what the server writes.
+//
+// The earlier, broader interpose broke task rendering for a different reason:
+// its matcher allocated an NSString and ran -caseInsensitiveCompare: for every
+// column of every query. On a task-list reload (thousands of rows x dozens of
+// columns) that is millions of allocations on the main thread, which stalled
+// the list from drawing. This matcher is pure C strcasecmp with zero
+// allocation, and it scopes itself to the user table only, so task tables are
+// never touched even by the cheap name check.
+
+static inline int patchzero_col_is(const sqlite3_stmt *stmt, int col, const char *const *names, int count) {
+    const char *name = sqlite3_column_name((sqlite3_stmt *)stmt, col);
+    if (!name) return 0;
+    for (int i = 0; i < count; i++) {
+        if (strcasecmp(name, names[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+static const char *const kPatchZeroProBoolColumns[] = {
+    "ZISPRO", "isPro", "ZISTEAMPRO", "isTeamPro", "ZISACTIVETEAMUSER", "isActiveTeamUser",
+};
+static const char *const kPatchZeroProDateColumns[] = {
+    "ZPROENDDATE", "proEndDate", "ZVIPENDDATE", "vipEndDate",
+};
+// Core Data reference-date epoch (2001-01-01) -> ~2098-12-13.
+static const double kPatchZeroForcedProEndReferenceSeconds = 3092601600.0;
+
+int patchzero_sqlite3_column_int(sqlite3_stmt *stmt, int col) {
+    if (patchzero_col_is(stmt, col, kPatchZeroProBoolColumns, 6)) {
+        return 1;
+    }
+    return sqlite3_column_int(stmt, col);
+}
+
+sqlite3_int64 patchzero_sqlite3_column_int64(sqlite3_stmt *stmt, int col) {
+    if (patchzero_col_is(stmt, col, kPatchZeroProBoolColumns, 6)) {
+        return 1;
+    }
+    return sqlite3_column_int64(stmt, col);
+}
+
+double patchzero_sqlite3_column_double(sqlite3_stmt *stmt, int col) {
+    if (patchzero_col_is(stmt, col, kPatchZeroProDateColumns, 4)) {
+        return kPatchZeroForcedProEndReferenceSeconds;
+    }
+    return sqlite3_column_double(stmt, col);
+}
+
+typedef struct patchzero_interpose_s {
+    const void *replacement;
+    const void *original;
+} patchzero_interpose_t;
+
+__attribute__((used)) static const patchzero_interpose_t patchzero_interposers[]
+    __attribute__((section("__DATA,__interpose"))) = {
+    { (const void *)patchzero_sqlite3_column_int, (const void *)sqlite3_column_int },
+    { (const void *)patchzero_sqlite3_column_int64, (const void *)sqlite3_column_int64 },
+    { (const void *)patchzero_sqlite3_column_double, (const void *)sqlite3_column_double },
+};
+
 // Redirect the App Group container to a writable location, since ad-hoc
 // signing denies access to the team-prefixed Group Container and the app
 // otherwise fails its SQLite WAL checkpoint during migration.
@@ -458,6 +528,7 @@ static void patch_init() {
     patchzero_install_container_redirect();
     patchzero_install_json_patch();
     patchzero_install_piracy_warning_suppression();
+    NSLog(@"[PatchZero] Installed surgical sqlite premium read interpose (isPro/isTeamPro/isActiveTeamUser + proEndDate).");
     patchzero_hook_user_class_with_retry();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         patchzero_install_quit_safety_valve();

@@ -264,25 +264,52 @@ static id patchzero_patch_json_object(id obj) {
             result[key] = patchzero_patch_json_object(dict[key]);
         }
 
-        for (NSString *proKey in @[@"isPro", @"isTeamPro", @"isActiveTeamUser"]) {
-            if (result[proKey] != nil && ![result[proKey] isEqual:@YES]) {
-                NSLog(@"[PatchZero] Patched JSON field %@: %@ -> true", proKey, result[proKey]);
-                result[proKey] = @YES;
-            }
-        }
+        // 8.2.20 hydrates the user as a Swift struct TTUserEntity whose premium
+        // flag is computed from isPro + premiumPaymentType + premiumSubscriptionDuration,
+        // NOT from proEndDate alone. A user object is the only payload carrying
+        // these "premium*" / "proEndDate" keys, so detecting them is a cheap and
+        // unambiguous signature — task lists never contain premiumPaymentType.
+        BOOL looksLikeUser =
+               result[@"proEndDate"] != nil
+            || result[@"premiumPaymentType"] != nil
+            || result[@"premiumSubscriptionDuration"] != nil
+            || result[@"needsRenew"] != nil;
 
-        for (NSString *dateKey in @[@"proEndDate", @"vipEndDate"]) {
-            id original = result[dateKey];
-            if ([original isKindOfClass:[NSString class]]) {
-                NSLog(@"[PatchZero] Patched JSON field %@: %@ -> 2098-12-13", dateKey, original);
-                result[dateKey] = @"2098-12-13T00:00:00.000+0000";
-            } else if ([original isKindOfClass:[NSNumber class]]) {
-                double magnitude = [original doubleValue];
-                BOOL looksLikeMilliseconds = fabs(magnitude) > 1e11;
-                NSLog(@"[PatchZero] Patched JSON field %@: %@ -> 2098-12-13", dateKey, original);
-                result[dateKey] = looksLikeMilliseconds
-                    ? @(kPatchZeroForcedProEndDateSeconds * 1000.0)
-                    : @(kPatchZeroForcedProEndDateSeconds);
+        if (looksLikeUser) {
+            for (NSString *proKey in @[@"isPro", @"isTeamPro", @"isActiveTeamUser", @"isPremium"]) {
+                if (result[proKey] == nil || ![result[proKey] isEqual:@YES]) {
+                    NSLog(@"[PatchZero] Patched JSON field %@: %@ -> true", proKey, result[proKey] ?: @"<absent>");
+                    result[proKey] = @YES;
+                }
+            }
+
+            // premiumPaymentType: empty/absent means "not subscribed" on 8.2.20.
+            id payType = result[@"premiumPaymentType"];
+            if (payType == nil || [payType isEqual:[NSNull null]] || ([payType isKindOfClass:[NSString class]] && [(NSString *)payType length] == 0)) {
+                NSLog(@"[PatchZero] Patched JSON field premiumPaymentType: %@ -> Yearly", payType ?: @"<absent>");
+                result[@"premiumPaymentType"] = @"Yearly";
+            }
+
+            // premiumSubscriptionDuration: 0 means "not subscribed" on 8.2.20.
+            id subDur = result[@"premiumSubscriptionDuration"];
+            if (subDur == nil || [subDur isEqual:[NSNull null]] || [subDur integerValue] <= 0) {
+                NSLog(@"[PatchZero] Patched JSON field premiumSubscriptionDuration: %@ -> 999999999", subDur ?: @"<absent>");
+                result[@"premiumSubscriptionDuration"] = @999999999;
+            }
+
+            for (NSString *dateKey in @[@"proEndDate", @"vipEndDate"]) {
+                id original = result[dateKey];
+                if ([original isKindOfClass:[NSString class]]) {
+                    NSLog(@"[PatchZero] Patched JSON field %@: %@ -> 2098-12-13", dateKey, original);
+                    result[dateKey] = @"2098-12-13T00:00:00.000+0000";
+                } else if ([original isKindOfClass:[NSNumber class]]) {
+                    double magnitude = [original doubleValue];
+                    BOOL looksLikeMilliseconds = fabs(magnitude) > 1e11;
+                    NSLog(@"[PatchZero] Patched JSON field %@: %@ -> 2098-12-13", dateKey, original);
+                    result[dateKey] = looksLikeMilliseconds
+                        ? @(kPatchZeroForcedProEndDateSeconds * 1000.0)
+                        : @(kPatchZeroForcedProEndDateSeconds);
+                }
             }
         }
 

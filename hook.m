@@ -128,12 +128,17 @@ static BOOL patchzero_alert_is_piracy_warning(NSAlert *alert) {
 
 // Cmd+Q fallback: if the app's own quit path is broken (menu beeping, etc.),
 // force-exit a second after the keypress rather than hang.
+//
+// Match by KEYCODE (12 = kVK_ANSI_Q), not by charactersIgnoringModifiers:
+// on a Cyrillic/Russian layout the Q key yields "й", so a literal @"q"
+// comparison misses Cmd+Q every time until the layout happens to be switched.
+// keyCode 12 is the physical key and layout-independent.
 static void patchzero_install_quit_safety_valve(void) {
     [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
         BOOL isCommandQ = (event.modifierFlags & NSEventModifierFlagCommand)
-            && [event.charactersIgnoringModifiers isEqualToString:@"q"];
+            && (event.keyCode == 12);
         if (isCommandQ) {
-            NSLog(@"[PatchZero] Cmd+Q seen; will force-quit in 1s if the app hasn't quit by itself.");
+            NSLog(@"[PatchZero] Cmd+Q seen (keyCode 12); will force-quit in 1s if the app hasn't quit by itself.");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 NSLog(@"[PatchZero] App still alive 1s after Cmd+Q; forcing exit.");
                 exit(0);

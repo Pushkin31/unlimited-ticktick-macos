@@ -107,19 +107,34 @@ static void patchzero_start_termination_block_window(void) {
 }
 
 // The tamper check closes/hides every window as part of its own shutdown
-// sequence before calling terminate:, which we block. Trying to also block
-// the window close/orderOut itself was tried and made things much worse: the
-// check re-runs periodically, and blocking its close made it retry in a
-// tight ~200-300ms loop instead of its normal ~20s cadence, pegging the main
-// thread. So instead: let close/orderOut proceed normally and re-show the
-// window a moment afterward.
+// sequence before calling terminate:, which we block. Restore only the app's
+// PRIMARY window afterward — not every window in the list. Reordering every
+// window to the front was what surfaced TickTick 8.2.20's stray premium/utility
+// panels (the random vertical/horizontal windows) every tamper-check cycle.
 static void patchzero_reopen_windows_shortly(void) {
+    NSWindow *mainWindow = [[NSApplication sharedApplication] mainWindow]
+                         ?: [[NSApplication sharedApplication] keyWindow];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        for (NSWindow *window in [NSApplication sharedApplication].windows) {
-            [window makeKeyAndOrderFront:nil];
+        if (mainWindow) {
+            [mainWindow makeKeyAndOrderFront:nil];
         }
         [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
     });
+}
+
+// One-time diagnostic: report what non-primary windows are visible so we can
+// identify the stray panels if they still appear. Bounded — runs only on the
+// first few peri-tamper-check ticks.
+static void patchzero_log_stray_windows(void) {
+    static int ticks = 0;
+    if (++ticks > 3) return;
+    for (NSWindow *w in [NSApplication sharedApplication].windows) {
+        if (![w isVisible]) continue;
+        NSWindow *mainW = [[NSApplication sharedApplication] mainWindow];
+        if (w == mainW) continue;
+        NSLog(@"[PatchZero] visible window: class=%@ title=%@ frame=%@",
+              NSStringFromClass([w class]), w.title ?: @"<nil>", NSStringFromRect(w.frame));
+    }
 }
 
 @implementation NSAlert (PatchZeroSuppressPiracyWarning)
@@ -128,6 +143,7 @@ static void patchzero_reopen_windows_shortly(void) {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Download TickTick.");
         patchzero_start_termination_block_window();
+        patchzero_log_stray_windows();
         patchzero_reopen_windows_shortly();
         return NSAlertFirstButtonReturn;
     }
@@ -138,6 +154,7 @@ static void patchzero_reopen_windows_shortly(void) {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Download TickTick.");
         patchzero_start_termination_block_window();
+        patchzero_log_stray_windows();
         patchzero_reopen_windows_shortly();
         if (handler) {
             handler(NSAlertFirstButtonReturn);
@@ -455,7 +472,11 @@ static NSString *const kPatchZeroCandidateClassNames[] = {
     @"TTUserModel",
 };
 
-static BOOL patchzero_try_hook_user_class(void) {
+// Return: 1 = hooked, 0 = class not loaded yet (retry), -1 = class exists but
+// has no ObjC isPro surface (Swift TTUserEntity model on 8.2.x — nothing to
+// hook, give up silently). Prevents the 200ms retry storm emitting four
+// WARNING lines per tick for a swizzle that is obsolete on 8.2.20.
+static int patchzero_try_hook_user_class(void) {
     Class class = nil;
     NSString *foundName = nil;
     for (size_t i = 0; i < sizeof(kPatchZeroCandidateClassNames) / sizeof(kPatchZeroCandidateClassNames[0]); i++) {
@@ -467,7 +488,7 @@ static BOOL patchzero_try_hook_user_class(void) {
         }
     }
     if (!class) {
-        return NO;
+        return 0;
     }
 
     SEL originalSelectors[] = {
@@ -484,6 +505,7 @@ static BOOL patchzero_try_hook_user_class(void) {
     };
 
     BOOL hookedAny = NO;
+    BOOL hasAnyMethod = NO;
     for (int i = 0; i < 4; i++) {
         Method originalMethod = class_getInstanceMethod(class, originalSelectors[i]);
         Method patchedMethod = class_getInstanceMethod([NSObject class], patchedSelectors[i]);
@@ -491,18 +513,28 @@ static BOOL patchzero_try_hook_user_class(void) {
             method_exchangeImplementations(originalMethod, patchedMethod);
             NSLog(@"[PatchZero] Hooked %@ %@", foundName, NSStringFromSelector(originalSelectors[i]));
             hookedAny = YES;
-        } else {
-            NSLog(@"[PatchZero] WARNING: %@ has no method %@", foundName, NSStringFromSelector(originalSelectors[i]));
+            hasAnyMethod = YES;
         }
     }
 
-    return hookedAny;
+    if (hookedAny) {
+        return 1;
+    }
+    if (!hasAnyMethod) {
+        NSLog(@"[PatchZero] %@ exists but exposes no ObjC isPro/proEndDate (Swift TTUserEntity model); premium is handled by the sqlite read interpose.", foundName);
+        return -1;
+    }
+    return 0;
 }
 
 static void patchzero_hook_user_class_with_retry(void) {
-    if (patchzero_try_hook_user_class()) {
+    int result = patchzero_try_hook_user_class();
+    if (result == 1) {
         NSLog(@"[PatchZero] Hooking complete.");
         return;
+    }
+    if (result == -1) {
+        return; // nothing to hook on this build, do not retry
     }
 
     NSLog(@"[PatchZero] User model class not found yet, will retry...");
@@ -512,8 +544,12 @@ static void patchzero_hook_user_class_with_retry(void) {
                                      repeats:YES
                                        block:^(NSTimer *timer) {
         attemptsRemaining--;
-        if (patchzero_try_hook_user_class()) {
+        int r = patchzero_try_hook_user_class();
+        if (r == 1) {
             NSLog(@"[PatchZero] Hooking complete (after retry).");
+            [timer invalidate];
+        } else if (r == -1) {
+            // Class is loaded and has no hook surface — stop quietly.
             [timer invalidate];
         } else if (attemptsRemaining <= 0) {
             NSLog(@"[PatchZero] WARNING: gave up looking for the user model class.");

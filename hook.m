@@ -716,25 +716,14 @@ static void patchzero_install_json_patch(void) {
 // from the app's point of view: whatever gets written, every read comes back
 // patched.
 //
-// Safety: this interpose fires on EVERY column of EVERY query against the
-// local store - including the folder/task list, which is also read from
-// sqlite (not the wire). Matching a column by NAME alone is not enough: a
-// same-named field on a non-user table, or worse a forced sqlite3_column_type
-// on a date column, makes Core Data build garbage rows, which surfaces
-// exactly as "tasks present but not rendered" (clicks change the header,
-// nothing draws). So every match is additionally gated on the column's
-// originating TABLE - only the user/subscription table is ever touched.
+// NOTE: we deliberately do NOT interpose sqlite3_column_type. Forcing a date
+// column to report SQLITE_FLOAT made Core Data/GRDB mis-parse rows where the
+// value is NULL - and the task list is fetched as a JOIN against the user
+// table (to gate premium UI), so the proEndDate column is present in every
+// task row and the lie about its type corrupted task-row construction, which
+// surfaced exactly as "tasks present but not rendered" on folder switch.
+// isPro (the actual premium gate) still comes through column_int below.
 static BOOL patchzero_column_name_is_one_of(sqlite3_stmt *stmt, int col, NSArray<NSString *> *names) {
-    // Only the user/subscription table's columns are eligible. sqlite3_column_table_name
-    // returns NULL for expressions/derived columns; those we never touch.
-    const char *rawTable = sqlite3_column_table_name(stmt, col);
-    if (!rawTable) {
-        return NO;
-    }
-    NSString *tableName = [NSString stringWithUTF8String:rawTable];
-    if ([tableName rangeOfString:@"USER" options:NSCaseInsensitiveSearch].location == NSNotFound) {
-        return NO; // a task/folder/list table (ZTTTASK etc.) - pass through untouched
-    }
     const char *rawName = sqlite3_column_name(stmt, col);
     if (!rawName) {
         return NO;
@@ -787,16 +776,12 @@ double patchzero_sqlite3_column_double(sqlite3_stmt *stmt, int col) {
     return sqlite3_column_double(stmt, col);
 }
 
-// Core Data checks the column type before trusting a REAL value; a row with
-// no proEndDate is otherwise reported as SQLITE_NULL and the forced double
-// above never gets read.
-int patchzero_sqlite3_column_type(sqlite3_stmt *stmt, int col) {
-    if (patchzero_column_name_is_one_of(stmt, col, patchzero_pro_date_columns())) {
-        return SQLITE_FLOAT;
-    }
-    return sqlite3_column_type(stmt, col);
-}
-
+// Core Data checks the column type before trusting a REAL value. We do NOT
+// interpose sqlite3_column_type anymore: forcing SQLITE_FLOAT on a NULL
+// proEndDate corrupted every task row in the task-list JOIN (see note above).
+// The only consequence is that a NULL proEndDate no longer gets its type lied
+// about - but isPro still returns 1 via column_int, which is what actually
+// gates premium, so the fixed date is no longer required.
 typedef struct patchzero_interpose_s {
     const void *replacement;
     const void *original;
@@ -807,7 +792,6 @@ __attribute__((used)) static const patchzero_interpose_t patchzero_interposers[]
     { (const void *)patchzero_sqlite3_column_int, (const void *)sqlite3_column_int },
     { (const void *)patchzero_sqlite3_column_int64, (const void *)sqlite3_column_int64 },
     { (const void *)patchzero_sqlite3_column_double, (const void *)sqlite3_column_double },
-    { (const void *)patchzero_sqlite3_column_type, (const void *)sqlite3_column_type },
 };
 
 // Redirect the App Group container to a writable location.

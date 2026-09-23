@@ -365,31 +365,43 @@ static void patchzero_arm_minimize_guard(double seconds) {
 // (log evidence: zero miniaturize: calls, visible flicker). Blocking those
 // outright provokes a 200-300ms retry storm (observed by the original
 // author), so instead: let the hide happen (the check's bookkeeping is
-// satisfied, no storm) and bring the window back on the NEXT runloop turn
-// (~ms) - the hide is invisible to the eye. Only while the guard is armed.
+// satisfied, no storm) and orderFront the window in the SAME call, before
+// the next display refresh - no frame is ever rendered without the window,
+// so nothing visibly blinks. Only while the guard is armed.
+//
+// Restore conditions: guard armed; a real on-screen window (number >= 0);
+// not the suppressed alert's own window; and it was visible (in the recent
+// snapshot or on screen right now). The alert's window reports windowNumber
+// -1 before it is ever shown - "restoring" it pops the piracy alert back
+// up (seen in the 8.2.20 log: "ordered out window -1" at suppression time
+// was our OWN hide call being instant-restored).
 @implementation NSWindow (PatchZeroInstantRestore)
 
 - (void)patched_orderOut:(id)sender {
     if (gPatchZeroMinimizeGuardArmed
-        && [self windowNumber] != gPatchZeroSuppressedWindowNumber) {
-        NSLog(@"[PatchZero] Tamper check ordered out window %ld; restoring next runloop turn.", (long)[self windowNumber]);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self orderFront:nil];
-        });
+        && [self windowNumber] >= 0
+        && [self windowNumber] != gPatchZeroSuppressedWindowNumber
+        && (patchzero_is_window_number_tracked([self windowNumber]) || self.isVisible)) {
+        NSLog(@"[PatchZero] Tamper check ordered out window %ld; restoring same turn.", (long)[self windowNumber]);
+        [self patched_orderOut:sender];
+        [self orderFront:nil];
+        return;
     }
     [self patched_orderOut:sender];
 }
 
 - (void)patched_close:(id)sender {
     if (gPatchZeroMinimizeGuardArmed
-        && [self windowNumber] != gPatchZeroSuppressedWindowNumber) {
-        NSLog(@"[PatchZero] Tamper check closed window %ld; restoring next runloop turn.", (long)[self windowNumber]);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (self.isMiniaturized) {
-                [self deminiaturize:nil];
-            }
-            [self orderFront:nil];
-        });
+        && [self windowNumber] >= 0
+        && [self windowNumber] != gPatchZeroSuppressedWindowNumber
+        && (patchzero_is_window_number_tracked([self windowNumber]) || self.isVisible)) {
+        NSLog(@"[PatchZero] Tamper check closed window %ld; restoring same turn.", (long)[self windowNumber]);
+        [self patched_close:sender];
+        if (self.isMiniaturized) {
+            [self deminiaturize:nil];
+        }
+        [self orderFront:nil];
+        return;
     }
     [self patched_close:sender];
 }

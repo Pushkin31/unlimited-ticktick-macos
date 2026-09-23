@@ -715,18 +715,25 @@ static void patchzero_install_json_patch(void) {
 // libsqlite3's C API to load rows. This makes isPro effectively immutable
 // from the app's point of view: whatever gets written, every read comes back
 // patched.
-// DIAGNOSTIC: disabled so we can bisect the "tasks not rendering on folder
-// switch" bug. The sqlite interpose rewrites column TYPES/VALUES on every
-// local-DB read (folder lists are read from the local store, not the wire,
-// so the JSON patch above never sees them). If Core Data gets a wrong column
-// type for a date/null column, row drawing stalls exactly like the reported
-// symptom. Force this matcher to always miss -> the whole sqlite layer is a
-// no-op -> premium dates come from the JSON patch only for this test.
-static BOOL patchzero_sqlite_patch_disabled = YES;
-
+//
+// Safety: this interpose fires on EVERY column of EVERY query against the
+// local store - including the folder/task list, which is also read from
+// sqlite (not the wire). Matching a column by NAME alone is not enough: a
+// same-named field on a non-user table, or worse a forced sqlite3_column_type
+// on a date column, makes Core Data build garbage rows, which surfaces
+// exactly as "tasks present but not rendered" (clicks change the header,
+// nothing draws). So every match is additionally gated on the column's
+// originating TABLE - only the user/subscription table is ever touched.
 static BOOL patchzero_column_name_is_one_of(sqlite3_stmt *stmt, int col, NSArray<NSString *> *names) {
-    if (patchzero_sqlite_patch_disabled) {
+    // Only the user/subscription table's columns are eligible. sqlite3_column_table_name
+    // returns NULL for expressions/derived columns; those we never touch.
+    const char *rawTable = sqlite3_column_table_name(stmt, col);
+    if (!rawTable) {
         return NO;
+    }
+    NSString *tableName = [NSString stringWithUTF8String:rawTable];
+    if ([tableName rangeOfString:@"USER" options:NSCaseInsensitiveSearch].location == NSNotFound) {
+        return NO; // a task/folder/list table (ZTTTASK etc.) - pass through untouched
     }
     const char *rawName = sqlite3_column_name(stmt, col);
     if (!rawName) {

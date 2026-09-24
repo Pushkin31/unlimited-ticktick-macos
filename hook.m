@@ -89,17 +89,31 @@ static BOOL patchzero_alert_is_piracy_warning(NSAlert *alert) {
     return mentionsTickTickInInfo && piracyKeyword;
 }
 
-// Window operations are NOT blocked on 8.2.20 — earlier attempts to block
-// orderOut/miniaturize/hide for what looked like a tamper-check fold actually
-// broke the app's normal window lifecycle (empty sidebar, greyed-out menu,
-// dead clicks). The "app minimizing at launch" is the AI-assistant onboarding
-// window (TTRoundedCornerWindow) folding the app as its own normal sequence,
-// not the tamper check. Instead of blocking, we now only LOG window show/hide
-// so the exact sequence is visible in the log for a precise, non-invasive fix.
+// Root cause, confirmed by the diagnostic log on 8.2.20: right after the piracy
+// alert is suppressed (answering "Download TickTick"), the alert's button handler
+// calls orderOut: on the MAIN window (TickTick.TTLegacyMainWindow) to clear the
+// screen for the App Store page — which we suppress, leaving the app with no
+// visible windows at all: the menu bar greys out (no key window), and the app
+// looks "minimized" until the user re-opens it from the Dock.
+//
+// Blocking the orderOut outright was tried and broke rendering (empty sidebar,
+// greyed menus, dead clicks): the app's internal window state diverged from
+// AppKit's. So instead: let the orderOut go through, then re-show the window in
+// the SAME runloop turn. State stays consistent, and the window never actually
+// leaves the screen (at worst a single-frame flicker).
+
+static volatile BOOL patchzero_tamper_window_active = NO;
+
+static void patchzero_arm_tamper_window(void) {
+    patchzero_tamper_window_active = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        patchzero_tamper_window_active = NO;
+    });
+}
 
 static void patchzero_log_window_op(NSString *verb, NSWindow *w) {
     static int logged = 0;
-    if (++logged > 40) return; // bound the log: enough to see the sequence
+    if (++logged > 60) return; // bound the log: enough to see the sequence
     NSLog(@"[PatchZero] %@ window class=%@ title=%@ visible=%d",
           verb, NSStringFromClass([w class]), w.title ?: @"<nil>", [w isVisible]);
 }
@@ -113,7 +127,16 @@ static void patchzero_log_window_op(NSString *verb, NSWindow *w) {
 
 - (void)patched_orderOut:(id)sender {
     patchzero_log_window_op(@"orderOut", self);
+    BOOL isTamperHide = patchzero_tamper_window_active
+        && self == [[NSApplication sharedApplication] mainWindow];
     [self patched_orderOut:sender];
+    if (isTamperHide) {
+        NSLog(@"[PatchZero] Tamper check ordered out main window; restoring same turn.");
+        [self orderFront:nil];
+        if ([[NSApplication sharedApplication] isActive]) {
+            [self makeKeyWindow];
+        }
+    }
 }
 
 - (void)patched_orderFront:(id)sender {
@@ -128,6 +151,7 @@ static void patchzero_log_window_op(NSString *verb, NSWindow *w) {
 - (NSModalResponse)patched_runModal {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Download TickTick.");
+        patchzero_arm_tamper_window();
         return NSAlertFirstButtonReturn;
     }
     return [self patched_runModal];
@@ -136,6 +160,7 @@ static void patchzero_log_window_op(NSString *verb, NSWindow *w) {
 - (void)patched_beginSheetModalForWindow:(NSWindow *)sheetWindow completionHandler:(void (^)(NSModalResponse returnCode))handler {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Download TickTick.");
+        patchzero_arm_tamper_window();
         if (handler) {
             handler(NSAlertFirstButtonReturn);
         }

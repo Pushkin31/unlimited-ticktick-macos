@@ -102,56 +102,61 @@ static BOOL patchzero_alert_is_piracy_warning(NSAlert *alert) {
 // the SAME runloop turn. State stays consistent, and the window never actually
 // leaves the screen (at worst a single-frame flicker).
 
-static volatile BOOL patchzero_tamper_window_active = NO;
+static volatile BOOL patchzero_block_termination = NO;
 
-static void patchzero_arm_tamper_window(void) {
-    patchzero_tamper_window_active = YES;
+// Armed only for 2s after a suppressed piracy alert: older builds (8.0.80 era)
+// terminated the app once the check had run. On 8.2.20 no terminate call shows
+// in the log, but answering Stop instead of a real button is unverified against
+// the alert's handler — if Stop ever routes to "quit", this swallows it. Normal
+// Cmd+Q never arms this, so user-initiated quit is unaffected.
+static void patchzero_arm_termination_block(void) {
+    patchzero_block_termination = YES;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        patchzero_tamper_window_active = NO;
+        patchzero_block_termination = NO;
     });
 }
 
-@implementation NSWindow (PatchZeroRestoreAfterTamperHide)
+@implementation NSApplication (PatchZeroBlockForcedQuit)
 
-// The piracy alert's "Download TickTick" handler calls orderOut: on the main
-// window to clear the screen for the App Store page (which we suppress). Let
-// the orderOut go through, then re-show the window in the SAME runloop turn —
-// blocking it outright broke rendering (AppKit/app state divergence), and
-// reading window state inside the hook (diagnostic logging) broke it too, so
-// this hook touches NOTHING except the one restore call on the main window.
-
-- (void)patched_orderOut:(id)sender {
-    BOOL isTamperHide = patchzero_tamper_window_active
-        && self == [[NSApplication sharedApplication] mainWindow];
-    [self patched_orderOut:sender];
-    if (isTamperHide) {
-        NSLog(@"[PatchZero] Tamper check ordered out main window; restoring same turn.");
-        [self orderFront:nil];
-        if ([[NSApplication sharedApplication] isActive]) {
-            [self makeKeyWindow];
-        }
+- (void)patched_terminate:(id)sender {
+    if (patchzero_block_termination) {
+        NSLog(@"[PatchZero] Blocked an app termination request during the post-alert window.");
+        return;
     }
+    [self patched_terminate:sender];
 }
 
 @end
+
+// Root cause of the "app folds itself" chain, from the diagnostic log: every
+// suppressed alert was answered with NSAlertFirstButtonReturn — which IS the
+// "Download TickTick" button. Its handler then opens the App Store (suppressed)
+// AND orderOut:'s the main window to clear the screen. With no visible window
+// the menu bar greys out and the app looks minimized. Blocking or restoring
+// that orderOut kept breaking rendering (empty sidebar / dead clicks), because
+// any intervention diverges AppKit state from the app's own bookkeeping.
+//
+// The correct move is upstream of all that: answer the suppressed alert with
+// NSModalResponseStop — a code matching NO button — so the handler runs none
+// of its branches at all. No App Store, no window hide, nothing to repair.
 
 @implementation NSAlert (PatchZeroSuppressPiracyWarning)
 
 - (NSModalResponse)patched_runModal {
     if (patchzero_alert_is_piracy_warning(self)) {
-        NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Download TickTick.");
-        patchzero_arm_tamper_window();
-        return NSAlertFirstButtonReturn;
+        NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Stop (no button action).");
+        patchzero_arm_termination_block();
+        return NSModalResponseStop;
     }
     return [self patched_runModal];
 }
 
 - (void)patched_beginSheetModalForWindow:(NSWindow *)sheetWindow completionHandler:(void (^)(NSModalResponse returnCode))handler {
     if (patchzero_alert_is_piracy_warning(self)) {
-        NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Download TickTick.");
-        patchzero_arm_tamper_window();
+        NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Stop (no button action).");
+        patchzero_arm_termination_block();
         if (handler) {
-            handler(NSAlertFirstButtonReturn);
+            handler(NSModalResponseStop);
         }
         return;
     }
@@ -227,11 +232,11 @@ static void patchzero_install_piracy_warning_suppression(void) {
         method_exchangeImplementations(originalOpenURL, patchedOpenURL);
     }
 
-    Class winCls = [NSWindow class];
-    Method originalOrderOut = class_getInstanceMethod(winCls, @selector(orderOut:));
-    Method patchedOrderOut = class_getInstanceMethod(winCls, @selector(patched_orderOut:));
-    if (originalOrderOut && patchedOrderOut) {
-        method_exchangeImplementations(originalOrderOut, patchedOrderOut);
+    Class appCls = [NSApplication class];
+    Method originalTerminate = class_getInstanceMethod(appCls, @selector(terminate:));
+    Method patchedTerminate = class_getInstanceMethod(appCls, @selector(patched_terminate:));
+    if (originalTerminate && patchedTerminate) {
+        method_exchangeImplementations(originalTerminate, patchedTerminate);
     }
 
     NSLog(@"[PatchZero] Hooked NSAlert to suppress the piracy warning.");

@@ -140,12 +140,96 @@ static void patchzero_arm_termination_block(void) {
 // NSModalResponseStop — a code matching NO button — so the handler runs none
 // of its branches at all. No App Store, no window hide, nothing to repair.
 
+// Main menu bar protection: the tamper check clears the app's main menu,
+// which is what makes "Close", "Copy" and every other menu item dead. Every
+// legit menu operation goes through setMainMenu:; we let non-empty
+// replacements through (the app might legitimately rebuild menus) but reject
+// nil and empty menus, and immediately restore a captured copy so the bar
+// never goes permanently dead.
+static NSMenu *gPatchZeroProtectedMenu = nil; // strong; set once, never released (process lifetime)
+
+@implementation NSApplication (PatchZeroProtectMainMenu)
+
+- (void)patched_setMainMenu:(NSMenu *)menu {
+    if (menu == nil || menu.numberOfItems == 0) {
+        if (gPatchZeroProtectedMenu != nil && [self mainMenu] != gPatchZeroProtectedMenu) {
+            NSLog(@"[PatchZero] Blocked clearing of main menu (tamper check), restoring.");
+            [self patched_setMainMenu:gPatchZeroProtectedMenu];
+        }
+        return; // refuse to clear the menu
+    }
+    if (gPatchZeroProtectedMenu == nil) {
+        gPatchZeroProtectedMenu = [menu retain];
+    }
+    [self patched_setMainMenu:menu];
+}
+
+@end
+
+// Re-enable every menu item that has an action (recursively through
+// submenus). The tamper check disables items via setEnabled:NO; this is
+// called on each suppression so the menu bar comes back alive. Items
+// without actions are left untouched.
+static void patchzero_enable_menu_items(NSMenu *menu) {
+    if (menu == nil) {
+        return;
+    }
+    for (NSMenuItem *item in [menu itemArray]) {
+        if (item.hasSubmenu) {
+            patchzero_enable_menu_items(item.submenu);
+        }
+        if (item.action != NULL) {
+            item.enabled = YES;
+        }
+    }
+}
+
+// Hook setActivationPolicy: so the tamper check cannot demote the app to
+// Prohibited/Accessory (which removes the global menu bar and makes dock
+// clicks misbehave). Legit app usage of Accessory would be blocked too, but
+// TickTick runs as a regular windowed app, so pin it to Regular.
+@implementation NSApplication (PatchZeroProtectActivationPolicy)
+
+- (void)patched_setActivationPolicy:(NSApplicationActivationPolicy)policy {
+    if (policy != NSApplicationActivationPolicyRegular) {
+        NSLog(@"[PatchZero] Blocked setActivationPolicy:%ld (tamper check), keeping Regular.", (long)policy);
+        policy = NSApplicationActivationPolicyRegular;
+    }
+    [self patched_setActivationPolicy:policy];
+}
+
+@end
+
+static void patchzero_install_menu_protection(void) {
+    Class cls = [NSApplication class];
+    Method origMainMenu = class_getInstanceMethod(cls, @selector(setMainMenu:));
+    Method replMainMenu = class_getInstanceMethod(cls, @selector(patched_setMainMenu:));
+    Method origPolicy = class_getInstanceMethod(cls, @selector(setActivationPolicy:));
+    Method replPolicy = class_getInstanceMethod(cls, @selector(patched_setActivationPolicy:));
+    if (origMainMenu && replMainMenu) {
+        method_exchangeImplementations(origMainMenu, replMainMenu);
+        if (gPatchZeroProtectedMenu == nil) {
+            gPatchZeroProtectedMenu = [[NSApplication sharedApplication].mainMenu retain];
+        }
+        NSLog(@"[PatchZero] Hooked setMainMenu: (menu bar protection).");
+    } else {
+        NSLog(@"[PatchZero] WARNING: could not hook setMainMenu:.");
+    }
+    if (origPolicy && replPolicy) {
+        method_exchangeImplementations(origPolicy, replPolicy);
+        NSLog(@"[PatchZero] Hooked setActivationPolicy: (pinned to Regular).");
+    } else {
+        NSLog(@"[PatchZero] WARNING: could not hook setActivationPolicy:.");
+    }
+}
+
 @implementation NSAlert (PatchZeroSuppressPiracyWarning)
 
 - (NSModalResponse)patched_runModal {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Stop (no button action).");
         patchzero_arm_termination_block();
+        patchzero_enable_menu_items([NSApplication sharedApplication].mainMenu);
         return NSModalResponseStop;
     }
     return [self patched_runModal];
@@ -155,6 +239,7 @@ static void patchzero_arm_termination_block(void) {
     if (patchzero_alert_is_piracy_warning(self)) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Stop (no button action).");
         patchzero_arm_termination_block();
+        patchzero_enable_menu_items([NSApplication sharedApplication].mainMenu);
         if (handler) {
             handler(NSModalResponseStop);
         }
@@ -566,6 +651,7 @@ static void patch_init() {
     patchzero_hook_user_class_with_retry();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         patchzero_install_quit_safety_valve();
+        patchzero_install_menu_protection();
         NSLog(@"[PatchZero] Installed Cmd+Q safety valve.");
     });
 }

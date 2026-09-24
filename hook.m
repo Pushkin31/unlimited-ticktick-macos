@@ -111,22 +111,16 @@ static void patchzero_arm_tamper_window(void) {
     });
 }
 
-static void patchzero_log_window_op(NSString *verb, NSWindow *w) {
-    static int logged = 0;
-    if (++logged > 60) return; // bound the log: enough to see the sequence
-    NSLog(@"[PatchZero] %@ window class=%@ title=%@ visible=%d",
-          verb, NSStringFromClass([w class]), w.title ?: @"<nil>", [w isVisible]);
-}
+@implementation NSWindow (PatchZeroRestoreAfterTamperHide)
 
-@implementation NSWindow (PatchZeroDiagnoseWindowLifecycle)
-
-- (void)patched_makeKeyAndOrderFront:(id)sender {
-    patchzero_log_window_op(@"show", self);
-    [self patched_makeKeyAndOrderFront:sender];
-}
+// The piracy alert's "Download TickTick" handler calls orderOut: on the main
+// window to clear the screen for the App Store page (which we suppress). Let
+// the orderOut go through, then re-show the window in the SAME runloop turn —
+// blocking it outright broke rendering (AppKit/app state divergence), and
+// reading window state inside the hook (diagnostic logging) broke it too, so
+// this hook touches NOTHING except the one restore call on the main window.
 
 - (void)patched_orderOut:(id)sender {
-    patchzero_log_window_op(@"orderOut", self);
     BOOL isTamperHide = patchzero_tamper_window_active
         && self == [[NSApplication sharedApplication] mainWindow];
     [self patched_orderOut:sender];
@@ -137,11 +131,6 @@ static void patchzero_log_window_op(NSString *verb, NSWindow *w) {
             [self makeKeyWindow];
         }
     }
-}
-
-- (void)patched_orderFront:(id)sender {
-    patchzero_log_window_op(@"orderFront", self);
-    [self patched_orderFront:sender];
 }
 
 @end
@@ -239,20 +228,10 @@ static void patchzero_install_piracy_warning_suppression(void) {
     }
 
     Class winCls = [NSWindow class];
-    Method originalMakeKey = class_getInstanceMethod(winCls, @selector(makeKeyAndOrderFront:));
-    Method patchedMakeKey = class_getInstanceMethod(winCls, @selector(patched_makeKeyAndOrderFront:));
-    if (originalMakeKey && patchedMakeKey) {
-        method_exchangeImplementations(originalMakeKey, patchedMakeKey);
-    }
     Method originalOrderOut = class_getInstanceMethod(winCls, @selector(orderOut:));
     Method patchedOrderOut = class_getInstanceMethod(winCls, @selector(patched_orderOut:));
     if (originalOrderOut && patchedOrderOut) {
         method_exchangeImplementations(originalOrderOut, patchedOrderOut);
-    }
-    Method originalOrderFront = class_getInstanceMethod(winCls, @selector(orderFront:));
-    Method patchedOrderFront = class_getInstanceMethod(winCls, @selector(patched_orderFront:));
-    if (originalOrderFront && patchedOrderFront) {
-        method_exchangeImplementations(originalOrderFront, patchedOrderFront);
     }
 
     NSLog(@"[PatchZero] Hooked NSAlert to suppress the piracy warning.");

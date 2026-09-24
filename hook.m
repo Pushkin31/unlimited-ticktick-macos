@@ -616,10 +616,17 @@ static int patchzero_try_hook_user_class(void) {
 // the app never settles. Instead of suppressing the alert at runModal (which
 // leaves the modal loop spinning), we replace the method's IMP with a no-op
 // so the alert is never created at all.
+//
+// TTOthersManager is a Swift class — its ObjC name is mangled
+// (_TtC8TickTick15TTOthersManager), not the plain "TTOthersManager".
 static void patchzero_noop_imp(void) {}
 
 static void patchzero_neuter_tamper_check(void) {
+    // Try both plain and mangled names; Swift classes get the _TtC prefix.
     Class cls = NSClassFromString(@"TTOthersManager");
+    if (!cls) {
+        cls = NSClassFromString(@"_TtC8TickTick15TTOthersManager");
+    }
     if (!cls) {
         NSLog(@"[PatchZero] TTOthersManager not loaded yet, will retry...");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{

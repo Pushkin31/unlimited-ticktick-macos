@@ -5,8 +5,147 @@
 #import <strings.h>
 
 // Minimal PatchZero dylib: container redirect + JSON patch + surgical sqlite
-// isPro read interpose. No window hooks, no menu protection, no neuter — those
-// were breaking rendering and the menu bar. This is the proven-stable baseline.
+// isPro read interpose + piracy alert suppression + App Store URL swallow.
+// No window hooks, no menu protection, no neuter — those were breaking
+// rendering and the menu bar. This is the proven-stable baseline plus the
+// alert suppression that was accidentally dropped.
+
+// ── Piracy alert suppression ─────────────────────────────────────────────────
+
+static NSString *const kPatchZeroPiracyTitles[] = {
+    @"Anwendung nicht lizenziert.",
+    @"Aplicació no llicenciada.",
+    @"Aplicación no autorizada",
+    @"Aplicativo não licenciado",
+    @"Aplicația nu este licențiată.",
+    @"Aplikace není licencována.",
+    @"Aplikacija ni licencirana.",
+    @"Aplikacija nije licencirana.",
+    @"Aplikasi Tidak Berlisensi.",
+    @"Aplikasi Tidak Dilisensikan",
+    @"Aplikácia nie je licencovaná.",
+    @"Application Not Licensed",
+    @"Application non licence",
+    @"Applicazione non autorizzata.",
+    @"Applikasjon ikke lisensiert",
+    @"Applikationen er ikke licenseret.",
+    @"Applikationen är inte licensierad.",
+    @"Az alkalmazás nincs engedélyezve.",
+    @"Ostrzeżenie o nielegalnej kopii aplikacji",
+    @"Programa neleisti.",
+    @"Programma nav licencēta.",
+    @"Rhybudd Dros Fersiwn Anghyfreithlon",
+    @"Sovellusta ei ole lisensoitu",
+    @"Toepassing niet gelicentieerd",
+    @"Uygulama Lisanslı Değil.",
+    @"Προειδοποίηση για παραβίαση πνευματικών δικαιωμάτων",
+    @"Попередження про порушення авторських прав.",
+    @"Праграма не ліцэнзавана",
+    @"Приложение не лицензировано",
+    @"Приложението не е лицензирано.",
+    @"אזהרת פרצות זכויות יוצרים",
+    @"برنامہ لائسنس نہیں ہے۔",
+    @"تحذير القرصنة",
+    @"هشدار قانونی نسخه‌ی غیرمجاز",
+    @"பிரதியேக உரிமை இல்லாத பயன்பாடு",
+    @"แจ้งเตือนการละเมิดลิขสิทธิ์",
+    @"Ứng dụng không được cấp phép",
+    @"ライセンスされていないアプリケーション",
+    @"盗版警告",
+    @"盜版警告",
+    @"해적판을 경고",
+    nil,
+};
+
+static BOOL patchzero_alert_is_piracy_warning(NSAlert *alert) {
+    NSString *title = alert.messageText ?: @"";
+    for (NSUInteger i = 0; kPatchZeroPiracyTitles[i] != nil; i++) {
+        if ([title isEqualToString:kPatchZeroPiracyTitles[i]]) {
+            return YES;
+        }
+    }
+    NSString *info = alert.informativeText ?: @"";
+    NSString *lowerTitle = title.lowercaseString;
+    NSString *lowerInfo = info.lowercaseString;
+    BOOL mentionsTickTickInInfo = [lowerInfo containsString:@"ticktick"];
+    BOOL piracyKeyword = [lowerInfo containsString:@"pirat"]
+        || [lowerInfo containsString:@"пират"]
+        || [lowerInfo containsString:@"raubkopiert"]
+        || [lowerInfo containsString:@"bajak"]
+        || [lowerInfo containsString:@"illegal"]
+        || [lowerInfo containsString:@"nelegal"]
+        || [lowerInfo containsString:@"盗版"]
+        || [lowerInfo containsString:@"海賊"]
+        || [lowerInfo containsString:@"해적"]
+        || [lowerTitle containsString:@"licens"]
+        || [lowerTitle containsString:@"лицензирован"];
+    return mentionsTickTickInInfo && piracyKeyword;
+}
+
+// Answer NSModalResponseStop (-1000): no button matches, so the handler runs
+// none of its branches — no App Store open, no window hide, no terminate.
+@implementation NSAlert (PatchZeroSuppressPiracyWarning)
+
+- (NSModalResponse)patched_runModal {
+    if (patchzero_alert_is_piracy_warning(self)) {
+        NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Stop.");
+        return NSModalResponseStop;
+    }
+    return [self patched_runModal];
+}
+
+- (void)patched_beginSheetModalForWindow:(NSWindow *)sheetWindow completionHandler:(void (^)(NSModalResponse returnCode))handler {
+    if (patchzero_alert_is_piracy_warning(self)) {
+        NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Stop.");
+        if (handler) {
+            handler(NSModalResponseStop);
+        }
+        return;
+    }
+    [self patched_beginSheetModalForWindow:sheetWindow completionHandler:handler];
+}
+
+@end
+
+@implementation NSWorkspace (PatchZeroSuppressAppStoreLink)
+
+- (BOOL)patched_openURL:(NSURL *)url {
+    if ([url.host containsString:@"apps.apple.com"] || [url.host containsString:@"itunes.apple.com"]) {
+        NSLog(@"[PatchZero] Suppressed opening App Store URL: %@", url);
+        return YES;
+    }
+    return [self patched_openURL:url];
+}
+
+@end
+
+static void patchzero_install_piracy_warning_suppression(void) {
+    Class cls = [NSAlert class];
+    SEL originalSelectors[] = {
+        @selector(runModal),
+        @selector(beginSheetModalForWindow:completionHandler:)
+    };
+    SEL patchedSelectors[] = {
+        @selector(patched_runModal),
+        @selector(patched_beginSheetModalForWindow:completionHandler:)
+    };
+    for (int i = 0; i < 2; i++) {
+        Method originalMethod = class_getInstanceMethod(cls, originalSelectors[i]);
+        Method patchedMethod = class_getInstanceMethod(cls, patchedSelectors[i]);
+        if (originalMethod && patchedMethod) {
+            method_exchangeImplementations(originalMethod, patchedMethod);
+        }
+    }
+
+    Class workspaceCls = [NSWorkspace class];
+    Method originalOpenURL = class_getInstanceMethod(workspaceCls, @selector(openURL:));
+    Method patchedOpenURL = class_getInstanceMethod(workspaceCls, @selector(patched_openURL:));
+    if (originalOpenURL && patchedOpenURL) {
+        method_exchangeImplementations(originalOpenURL, patchedOpenURL);
+    }
+
+    NSLog(@"[PatchZero] Hooked NSAlert to suppress the piracy warning.");
+}
 
 // ── Container redirect ──────────────────────────────────────────────────────
 
@@ -175,5 +314,6 @@ static void patch_init() {
     NSLog(@"[PatchZero] Hooking...");
     patchzero_install_container_redirect();
     patchzero_install_json_patch();
+    patchzero_install_piracy_warning_suppression();
     NSLog(@"[PatchZero] Installed surgical sqlite premium read interpose (isPro/isTeamPro/isActiveTeamUser).");
 }

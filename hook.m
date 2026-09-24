@@ -120,17 +120,23 @@ static void patchzero_start_window_op_block(void) {
 
 @implementation NSWindow (PatchZeroBlockTamperOrderOut)
 
+// Only swallow the MAIN window's orderOut/miniaturize — that's the tamper
+// check's "fold the app into the Dock" move. Popovers (TTPopover.PopWindow),
+// the AI onboarding sheet (TTRoundedCornerWindow) and any other utility windows
+// must be allowed to close normally: blocking their orderOut left them hanging
+// as invisible overlay windows that ate every click.
+
 - (void)patched_miniaturize:(id)sender {
-    if (patchzero_block_window_ops) {
-        NSLog(@"[PatchZero] Blocked window miniaturize (class %@) (post-tamper-check window).", NSStringFromClass([self class]));
+    if (patchzero_block_window_ops && self == [[NSApplication sharedApplication] mainWindow]) {
+        NSLog(@"[PatchZero] Blocked main window miniaturize (post-tamper-check window).");
         return;
     }
     [self patched_miniaturize:sender];
 }
 
 - (void)patched_orderOut:(id)sender {
-    if (patchzero_block_window_ops) {
-        NSLog(@"[PatchZero] Blocked window orderOut (class %@) (post-tamper-check window).", NSStringFromClass([self class]));
+    if (patchzero_block_window_ops && self == [[NSApplication sharedApplication] mainWindow]) {
+        NSLog(@"[PatchZero] Blocked main window orderOut (post-tamper-check window).");
         return;
     }
     [self patched_orderOut:sender];

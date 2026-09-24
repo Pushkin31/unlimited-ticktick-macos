@@ -610,6 +610,34 @@ static int patchzero_try_hook_user_class(void) {
     return 0;
 }
 
+// Neuter the tamper check at its source. On 8.2.20 the check is driven by a
+// timer inside TTOthersManager (Swift) that calls checkAndShowAlertIfNeeded
+// every few seconds — that is why the piracy alert keeps firing forever and
+// the app never settles. Instead of suppressing the alert at runModal (which
+// leaves the modal loop spinning), we replace the method's IMP with a no-op
+// so the alert is never created at all.
+static void patchzero_noop_imp(void) {}
+
+static void patchzero_neuter_tamper_check(void) {
+    Class cls = NSClassFromString(@"TTOthersManager");
+    if (!cls) {
+        NSLog(@"[PatchZero] TTOthersManager not loaded yet, will retry...");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            patchzero_neuter_tamper_check();
+        });
+        return;
+    }
+    SEL sel = sel_registerName("checkAndShowAlertIfNeeded");
+    Method m = class_getInstanceMethod(cls, sel);
+    if (m) {
+        IMP noop = (IMP)patchzero_noop_imp;
+        method_setImplementation(m, noop);
+        NSLog(@"[PatchZero] Neutered TTOthersManager.checkAndShowAlertIfNeeded — piracy alert will never fire.");
+    } else {
+        NSLog(@"[PatchZero] WARNING: TTOthersManager has no checkAndShowAlertIfNeeded (already neutered or renamed).");
+    }
+}
+
 static void patchzero_hook_user_class_with_retry(void) {
     int result = patchzero_try_hook_user_class();
     if (result == 1) {
@@ -649,6 +677,7 @@ static void patch_init() {
     patchzero_install_piracy_warning_suppression();
     NSLog(@"[PatchZero] Installed surgical sqlite premium read interpose (isPro/isTeamPro/isActiveTeamUser + proEndDate).");
     patchzero_hook_user_class_with_retry();
+    patchzero_neuter_tamper_check();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         patchzero_install_quit_safety_valve();
         patchzero_install_menu_protection();

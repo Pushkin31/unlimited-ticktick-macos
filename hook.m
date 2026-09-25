@@ -279,23 +279,45 @@ static void patchzero_restore_startup_window(void) {
         return;
     }
     gPatchZeroStartupWindowRecoveryScheduled = YES;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (gPatchZeroQuitting) {
+    // The first alert can be handled before TickTick assigns mainWindow. Keep
+    // looking briefly instead of giving up on the first nil result.
+    __block int attempts = 0;
+    NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *timer) {
+        if (gPatchZeroQuitting || !patchzero_in_launch_window() || ++attempts > 12) {
+            [timer invalidate];
             return;
         }
-        NSWindow *mainWindow = [NSApplication sharedApplication].mainWindow;
-        if (!mainWindow) {
-            NSLog(@"[PatchZero] Startup window recovery: main window unavailable.");
+
+        NSApplication *app = [NSApplication sharedApplication];
+        [app unhideWithoutActivation];
+        NSWindow *target = app.mainWindow;
+        if (!target) {
+            for (NSWindow *window in app.windows) {
+                if ([window isKindOfClass:[NSPanel class]] || window == [NSApp keyWindow]) {
+                    continue;
+                }
+                if ((window.styleMask & NSWindowStyleMaskTitled) && window.frame.size.width > 200.0
+                    && window.frame.size.height > 150.0) {
+                    target = window;
+                    break;
+                }
+            }
+        }
+        if (!target) {
             return;
         }
-        if (mainWindow.isMiniaturized) {
-            NSLog(@"[PatchZero] Startup integrity check miniaturized main window; restoring it.");
-            [mainWindow deminiaturize:nil];
-        } else if (!mainWindow.isVisible) {
-            NSLog(@"[PatchZero] Startup integrity check hid main window; restoring it.");
-            [mainWindow orderFrontRegardless];
+        if (target.isMiniaturized) {
+            NSLog(@"[PatchZero] Startup integrity check miniaturized window; restoring it.");
+            [target deminiaturize:nil];
+        } else if (!target.isVisible) {
+            NSLog(@"[PatchZero] Startup integrity check hid window; restoring it.");
+            [target orderFrontRegardless];
         }
-    });
+        if (target.isVisible && !target.isMiniaturized) {
+            [timer invalidate];
+        }
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
 }
 
 // TickTick re-runs the integrity check when the app is activated from the Dock.

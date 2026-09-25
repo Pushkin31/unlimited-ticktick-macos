@@ -260,8 +260,10 @@ static void patchzero_arm_startup_orderout_guard(void) {
         // Let AppKit complete the transaction before restoring the window.
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!gPatchZeroQuitting && patchzero_in_launch_window() && !self.isMiniaturized) {
-                NSLog(@"[PatchZero] Restoring startup window after orderOut.");
-                [self orderFrontRegardless];
+                NSLog(@"[PatchZero] Restoring startup window and focus after orderOut.");
+                [self orderFront:nil];
+                [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+                [self makeKeyWindow];
             }
         });
         return;
@@ -353,9 +355,13 @@ static void patchzero_restore_startup_window(void) {
         if (target.isMiniaturized) {
             NSLog(@"[PatchZero] Startup integrity check miniaturized window; restoring it.");
             [target deminiaturize:nil];
+            [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+            [target makeKeyWindow];
         } else if (!target.isVisible) {
-            NSLog(@"[PatchZero] Startup integrity check hid window; restoring it without activation.");
+            NSLog(@"[PatchZero] Startup integrity check hid window; restoring it with focus.");
             [target orderFront:nil];
+            [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+            [target makeKeyWindow];
         }
     }];
     [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];

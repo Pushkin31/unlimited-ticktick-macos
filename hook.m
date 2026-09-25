@@ -4,11 +4,11 @@
 #import <sqlite3.h>
 #import <strings.h>
 
-// Minimal PatchZero dylib: container redirect + JSON patch + surgical sqlite
-// isPro read interpose + piracy alert suppression + App Store URL swallow.
-// No window hooks, no menu protection, no neuter — those were breaking
-// rendering and the menu bar. This is the proven-stable baseline plus the
-// alert suppression that was accidentally dropped.
+// ── Minimal PatchZero dylib: container redirect + JSON patch + surgical sqlite
+// isPro read interpose + piracy alert suppression + App Store URL swallow +
+// activation policy pin + main menu protection + same-turn window restore.
+// No window close/miniaturize hooks, no neuter, no diagnostics — those were
+// breaking rendering and the menu bar. This is the proven-stable baseline.
 
 // ── Piracy alert suppression ─────────────────────────────────────────────────
 
@@ -118,6 +118,141 @@ static BOOL patchzero_alert_is_piracy_warning(NSAlert *alert) {
 }
 
 @end
+
+// ── Main menu protection ─────────────────────────────────────────────────────
+
+static NSMenu *gPatchZeroProtectedMenu = nil;
+
+@implementation NSApplication (PatchZeroProtectMainMenu)
+
+- (void)patched_setMainMenu:(NSMenu *)menu {
+    if (menu == nil || menu.numberOfItems == 0) {
+        if (gPatchZeroProtectedMenu != nil && [self mainMenu] != gPatchZeroProtectedMenu) {
+            NSLog(@"[PatchZero] Blocked clearing of main menu, restoring.");
+            [self patched_setMainMenu:gPatchZeroProtectedMenu];
+        }
+        return;
+    }
+    if (gPatchZeroProtectedMenu == nil) {
+        gPatchZeroProtectedMenu = [menu retain];
+    }
+    [self patched_setMainMenu:menu];
+}
+
+@end
+
+static void patchzero_enable_menu_items(NSMenu *menu) {
+    if (menu == nil) return;
+    for (NSMenuItem *item in [menu itemArray]) {
+        if (item.hasSubmenu) {
+            patchzero_enable_menu_items(item.submenu);
+        }
+        if (item.action != NULL) {
+            item.enabled = YES;
+        }
+    }
+}
+
+// ── Activation policy pin ───────────────────────────────────────────────────
+
+@implementation NSApplication (PatchZeroProtectActivationPolicy)
+
+- (void)patched_setActivationPolicy:(NSApplicationActivationPolicy)policy {
+    if (policy != NSApplicationActivationPolicyRegular) {
+        NSLog(@"[PatchZero] Blocked setActivationPolicy:%ld, keeping Regular.", (long)policy);
+        policy = NSApplicationActivationPolicyRegular;
+    }
+    [self patched_setActivationPolicy:policy];
+}
+
+@end
+
+// ── Window restore (main window only, same turn) ─────────────────────────────
+
+static volatile BOOL gPatchZeroTamperWindowActive = NO;
+
+static void patchzero_arm_tamper_window(void) {
+    gPatchZeroTamperWindowActive = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        gPatchZeroTamperWindowActive = NO;
+    });
+}
+
+@implementation NSWindow (PatchZeroRestoreAfterTamperHide)
+
+- (void)patched_orderOut:(id)sender {
+    BOOL isTamperHide = gPatchZeroTamperWindowActive
+        && self == [[NSApplication sharedApplication] mainWindow];
+    [self patched_orderOut:sender];
+    if (isTamperHide) {
+        NSLog(@"[PatchZero] Tamper check ordered out main window; restoring same turn.");
+        [self orderFront:nil];
+        if ([[NSApplication sharedApplication] isActive]) {
+            [self makeKeyWindow];
+        }
+    }
+}
+
+@end
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+
+static void patchzero_install_piracy_warning_suppression(void) {
+    Class cls = [NSAlert class];
+    SEL originalSelectors[] = {
+        @selector(runModal),
+        @selector(beginSheetModalForWindow:completionHandler:)
+    };
+    SEL patchedSelectors[] = {
+        @selector(patched_runModal),
+        @selector(patched_beginSheetModalForWindow:completionHandler:)
+    };
+    for (int i = 0; i < 2; i++) {
+        Method originalMethod = class_getInstanceMethod(cls, originalSelectors[i]);
+        Method patchedMethod = class_getInstanceMethod(cls, patchedSelectors[i]);
+        if (originalMethod && patchedMethod) {
+            method_exchangeImplementations(originalMethod, patchedMethod);
+        }
+    }
+
+    Class workspaceCls = [NSWorkspace class];
+    Method originalOpenURL = class_getInstanceMethod(workspaceCls, @selector(openURL:));
+    Method patchedOpenURL = class_getInstanceMethod(workspaceCls, @selector(patched_openURL:));
+    if (originalOpenURL && patchedOpenURL) {
+        method_exchangeImplementations(originalOpenURL, patchedOpenURL);
+    }
+
+    NSLog(@"[PatchZero] Hooked NSAlert to suppress the piracy warning.");
+}
+
+static void patchzero_install_menu_protection(void) {
+    Class cls = [NSApplication class];
+    Method origMainMenu = class_getInstanceMethod(cls, @selector(setMainMenu:));
+    Method replMainMenu = class_getInstanceMethod(cls, @selector(patched_setMainMenu:));
+    Method origPolicy = class_getInstanceMethod(cls, @selector(setActivationPolicy:));
+    Method replPolicy = class_getInstanceMethod(cls, @selector(patched_setActivationPolicy:));
+    if (origMainMenu && replMainMenu) {
+        method_exchangeImplementations(origMainMenu, replMainMenu);
+        if (gPatchZeroProtectedMenu == nil) {
+            gPatchZeroProtectedMenu = [[NSApplication sharedApplication].mainMenu retain];
+        }
+        NSLog(@"[PatchZero] Hooked setMainMenu: (menu bar protection).");
+    }
+    if (origPolicy && replPolicy) {
+        method_exchangeImplementations(origPolicy, replPolicy);
+        NSLog(@"[PatchZero] Hooked setActivationPolicy: (pinned to Regular).");
+    }
+}
+
+static void patchzero_install_window_restore(void) {
+    Class cls = [NSWindow class];
+    Method orig = class_getInstanceMethod(cls, @selector(orderOut:));
+    Method repl = class_getInstanceMethod(cls, @selector(patched_orderOut:));
+    if (orig && repl) {
+        method_exchangeImplementations(orig, repl);
+        NSLog(@"[PatchZero] Hooked NSWindow orderOut: (main-window restore).");
+    }
+}
 
 static void patchzero_install_piracy_warning_suppression(void) {
     Class cls = [NSAlert class];
@@ -281,6 +416,10 @@ static inline int patchzero_col_is(const sqlite3_stmt *stmt, int col, const char
 static const char *const kPatchZeroProBoolColumns[] = {
     "ZISPRO", "isPro", "ZISTEAMPRO", "isTeamPro", "ZISACTIVETEAMUSER", "isActiveTeamUser",
 };
+static const char *const kPatchZeroProDateColumns[] = {
+    "ZPROENDDATE", "proEndDate", "ZVIPENDDATE", "vipEndDate",
+};
+static const double kPatchZeroForcedProEndReferenceSeconds = 3092601600.0; // ~2098 (Core Data ref epoch)
 
 int patchzero_sqlite3_column_int(sqlite3_stmt *stmt, int col) {
     if (patchzero_col_is(stmt, col, kPatchZeroProBoolColumns, 6)) {
@@ -296,6 +435,13 @@ sqlite3_int64 patchzero_sqlite3_column_int64(sqlite3_stmt *stmt, int col) {
     return sqlite3_column_int64(stmt, col);
 }
 
+double patchzero_sqlite3_column_double(sqlite3_stmt *stmt, int col) {
+    if (patchzero_col_is(stmt, col, kPatchZeroProDateColumns, 4)) {
+        return kPatchZeroForcedProEndReferenceSeconds;
+    }
+    return sqlite3_column_double(stmt, col);
+}
+
 typedef struct patchzero_interpose_s {
     const void *replacement;
     const void *original;
@@ -305,6 +451,7 @@ __attribute__((used)) static const patchzero_interpose_t patchzero_interposers[]
     __attribute__((section("__DATA,__interpose"))) = {
     { (const void *)patchzero_sqlite3_column_int, (const void *)sqlite3_column_int },
     { (const void *)patchzero_sqlite3_column_int64, (const void *)sqlite3_column_int64 },
+    { (const void *)patchzero_sqlite3_column_double, (const void *)sqlite3_column_double },
 };
 
 // ── Init ─────────────────────────────────────────────────────────────────────
@@ -315,5 +462,10 @@ static void patch_init() {
     patchzero_install_container_redirect();
     patchzero_install_json_patch();
     patchzero_install_piracy_warning_suppression();
-    NSLog(@"[PatchZero] Installed surgical sqlite premium read interpose (isPro/isTeamPro/isActiveTeamUser).");
+    NSLog(@"[PatchZero] Installed surgical sqlite premium read interpose (isPro/isTeamPro/isActiveTeamUser + proEndDate).");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        patchzero_install_menu_protection();
+        patchzero_install_window_restore();
+        NSLog(@"[PatchZero] Installed menu protection and window restore.");
+    });
 }

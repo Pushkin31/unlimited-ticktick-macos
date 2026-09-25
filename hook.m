@@ -252,15 +252,22 @@ static void patchzero_arm_startup_orderout_guard(void) {
 @implementation NSWindow (PatchZeroRestoreAfterTamperHide)
 
 - (void)patched_orderOut:(id)sender {
-    if (gPatchZeroBlockStartupOrderOut && patchzero_in_launch_window()
+    BOOL isStartupWindow = gPatchZeroBlockStartupOrderOut && patchzero_in_launch_window()
         && !gPatchZeroQuitting && [self windowNumber] != gPatchZeroSuppressedWindowNumber
-        && ![self isKindOfClass:[NSPanel class]] && (self.styleMask & NSWindowStyleMaskTitled)) {
-        NSLog(@"[PatchZero] Blocked startup orderOut on main application window.");
+        && ![self isKindOfClass:[NSPanel class]] && (self.styleMask & NSWindowStyleMaskTitled);
+    [self patched_orderOut:sender];
+    if (isStartupWindow) {
+        // Let AppKit complete the transaction before restoring the window.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!gPatchZeroQuitting && patchzero_in_launch_window() && !self.isMiniaturized) {
+                NSLog(@"[PatchZero] Restoring startup window after orderOut.");
+                [self orderFrontRegardless];
+            }
+        });
         return;
     }
     BOOL wasArmed = patchzero_in_launch_window() && !gPatchZeroQuitting
         && self == [[NSApplication sharedApplication] mainWindow];
-    [self patched_orderOut:sender];
     if (!wasArmed) {
         return;
     }

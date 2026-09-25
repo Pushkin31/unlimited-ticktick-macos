@@ -319,10 +319,11 @@ static void patchzero_restore_startup_window(void) {
     }
     gPatchZeroStartupWindowRecoveryScheduled = YES;
     // The integrity check may hide the app asynchronously, after the first
-    // recovery pass. Observe startup for up to 15 seconds.
+    // Only cover the initial integrity-check transition. A longer timer
+    // conflicts with later Dock hide/show actions and steals focus repeatedly.
     __block int attempts = 0;
     NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *timer) {
-        if (gPatchZeroQuitting || !patchzero_in_launch_window() || ++attempts > 60) {
+        if (gPatchZeroQuitting || !patchzero_in_launch_window() || ++attempts > 20) {
             [timer invalidate];
             return;
         }
@@ -353,8 +354,8 @@ static void patchzero_restore_startup_window(void) {
             NSLog(@"[PatchZero] Startup integrity check miniaturized window; restoring it.");
             [target deminiaturize:nil];
         } else if (!target.isVisible) {
-            NSLog(@"[PatchZero] Startup integrity check hid window; restoring it.");
-            [target orderFrontRegardless];
+            NSLog(@"[PatchZero] Startup integrity check hid window; restoring it without activation.");
+            [target orderFront:nil];
         }
     }];
     [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];

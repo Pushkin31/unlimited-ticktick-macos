@@ -293,11 +293,18 @@ static void patchzero_arm_minimize_guard(double seconds) {
         }
     }
     if (!anyVisible) {
-        NSLog(@"[PatchZero] Tamper check left app windowless; restoring main window %ld same turn.", (long)[self windowNumber]);
-        [self orderFront:nil];
-        if ([[NSApplication sharedApplication] isActive]) {
-            [self makeKeyWindow];
-        }
+        // Restore on the NEXT runloop turn, NOT inside this orderOut call:
+        // same-turn orderFront broke the CATransaction — window came back but
+        // its layer stayed blank (tasks clickable yet invisible). The proven
+        // c0afc96 build restored on a delayed turn and rendered fine.
+        NSLog(@"[PatchZero] Tamper check left app windowless; restoring main window next turn.");
+        NSWindow *win = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [win orderFront:nil];
+            if ([[NSApplication sharedApplication] isActive]) {
+                [win makeKeyWindow];
+            }
+        });
     }
 }
 

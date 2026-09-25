@@ -236,14 +236,28 @@ static NSDate *gPatchZeroLaunchTime = nil;
 // otherwise the orderOut restore pulls the window back on screen WHILE the app
 // is quitting (seen in the 20:36 log: "Cmd+Q" followed by "restoring main window").
 
+static volatile BOOL gPatchZeroBlockStartupOrderOut = NO;
+
 static BOOL patchzero_in_launch_window(void) {
     return gPatchZeroLaunchTime != nil
         && [[NSDate date] timeIntervalSinceDate:gPatchZeroLaunchTime] < 20.0;
 }
 
+static void patchzero_arm_startup_orderout_guard(void) {
+    gPatchZeroBlockStartupOrderOut = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        gPatchZeroBlockStartupOrderOut = NO;
+    });
+}
 @implementation NSWindow (PatchZeroRestoreAfterTamperHide)
 
 - (void)patched_orderOut:(id)sender {
+    if (gPatchZeroBlockStartupOrderOut && patchzero_in_launch_window()
+        && !gPatchZeroQuitting && [self windowNumber] != gPatchZeroSuppressedWindowNumber
+        && ![self isKindOfClass:[NSPanel class]] && (self.styleMask & NSWindowStyleMaskTitled)) {
+        NSLog(@"[PatchZero] Blocked startup orderOut on main application window.");
+        return;
+    }
     BOOL wasArmed = patchzero_in_launch_window() && !gPatchZeroQuitting
         && self == [[NSApplication sharedApplication] mainWindow];
     [self patched_orderOut:sender];
@@ -374,8 +388,8 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
             // The first-button response is the only response accepted by the
             // app's startup handler. Do it once, not on every Dock activation.
             patchzero_arm_termination_block();
+            patchzero_arm_startup_orderout_guard();
             patchzero_restore_startup_window();
-            return NSAlertFirstButtonReturn;
         }
         return NSModalResponseCancel;
     }

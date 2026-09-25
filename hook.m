@@ -109,6 +109,25 @@ static void patchzero_arm_termination_block(void) {
 
 @end
 
+static BOOL patchzero_in_launch_window(void);
+static volatile BOOL gPatchZeroQuitting = NO;
+
+// TickTick hides the whole application after the first integrity-check answer.
+// This is distinct from NSWindow orderOut and is the cause of the launch fold.
+static volatile BOOL gPatchZeroBlockStartupHide = NO;
+
+@implementation NSApplication (PatchZeroBlockStartupHide)
+
+- (void)patched_hide:(id)sender {
+    if (gPatchZeroBlockStartupHide && patchzero_in_launch_window() && !gPatchZeroQuitting) {
+        NSLog(@"[PatchZero] Blocked automatic application hide during startup.");
+        return;
+    }
+    [self patched_hide:sender];
+}
+
+@end
+
 // ── Main menu protection ─────────────────────────────────────────────────────
 
 static NSMenu *gPatchZeroProtectedMenu = nil;
@@ -216,7 +235,6 @@ static NSDate *gPatchZeroLaunchTime = nil;
 // Set when the user pressed Cmd+Q: all window-recovery paths must stand down,
 // otherwise the orderOut restore pulls the window back on screen WHILE the app
 // is quitting (seen in the 20:36 log: "Cmd+Q" followed by "restoring main window").
-static volatile BOOL gPatchZeroQuitting = NO;
 
 static BOOL patchzero_in_launch_window(void) {
     return gPatchZeroLaunchTime != nil
@@ -422,6 +440,12 @@ static void patchzero_install_piracy_warning_suppression(void) {
     }
 
     Class appCls = [NSApplication class];
+    Method originalHide = class_getInstanceMethod(appCls, @selector(hide:));
+    Method patchedHide = class_getInstanceMethod(appCls, @selector(patched_hide:));
+    if (originalHide && patchedHide) {
+        method_exchangeImplementations(originalHide, patchedHide);
+        gPatchZeroBlockStartupHide = YES;
+    }
     Method originalTerminate = class_getInstanceMethod(appCls, @selector(terminate:));
     Method patchedTerminate = class_getInstanceMethod(appCls, @selector(patched_terminate:));
     if (originalTerminate && patchedTerminate) {

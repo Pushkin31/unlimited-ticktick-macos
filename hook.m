@@ -268,6 +268,36 @@ static void patchzero_install_minimize_guard(void) {
 - (NSWindow *)window;
 @end
 
+// TickTick's first integrity-check response can miniaturize the main window.
+// Recover only that startup transition, once; do not intercept normal Dock
+// activation or user-initiated minimize after the app is usable.
+static volatile BOOL gPatchZeroStartupWindowRecoveryScheduled = NO;
+
+static void patchzero_restore_startup_window(void) {
+    if (gPatchZeroQuitting || !patchzero_in_launch_window()
+        || gPatchZeroStartupWindowRecoveryScheduled) {
+        return;
+    }
+    gPatchZeroStartupWindowRecoveryScheduled = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (gPatchZeroQuitting) {
+            return;
+        }
+        NSWindow *mainWindow = [NSApplication sharedApplication].mainWindow;
+        if (!mainWindow) {
+            NSLog(@"[PatchZero] Startup window recovery: main window unavailable.");
+            return;
+        }
+        if (mainWindow.isMiniaturized) {
+            NSLog(@"[PatchZero] Startup integrity check miniaturized main window; restoring it.");
+            [mainWindow deminiaturize:nil];
+        } else if (!mainWindow.isVisible) {
+            NSLog(@"[PatchZero] Startup integrity check hid main window; restoring it.");
+            [mainWindow orderFrontRegardless];
+        }
+    });
+}
+
 // TickTick re-runs the integrity check when the app is activated from the Dock.
 // Returning FirstButtonReturn on every invocation makes its "Download TickTick"
 // path run repeatedly and leaves the app in a modal loop, so Dock activation
@@ -303,6 +333,7 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
             // The first-button response is the only response accepted by the
             // app's startup handler. Do it once, not on every Dock activation.
             patchzero_arm_termination_block();
+            patchzero_restore_startup_window();
             return NSAlertFirstButtonReturn;
         }
         return NSModalResponseCancel;
@@ -319,6 +350,7 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
         patchzero_hide_suppressed_alert_window(self);
         if (firstAnswer) {
             patchzero_arm_termination_block();
+            patchzero_restore_startup_window();
         }
         if (handler) {
             handler(firstAnswer ? NSAlertFirstButtonReturn : NSModalResponseCancel);

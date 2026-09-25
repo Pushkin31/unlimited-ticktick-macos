@@ -510,10 +510,21 @@ static id patchzero_patch_json_object(id obj) {
                 result[@"premiumPaymentType"] = @"Yearly";
             }
 
+            // premiumSubscriptionDuration is String? in TTUserDTO (DB column
+            // ZPREMIUMSUBSCRIPTIONDURATION is VARCHAR). Injecting a NUMBER here
+            // made Swift Codable fail decoding the whole sync response — that
+            // is why tasks vanished after the first sync. Only fix up the value
+            // when the server actually sent one, and keep the type String.
             id subDur = result[@"premiumSubscriptionDuration"];
-            if (subDur == nil || [subDur isEqual:[NSNull null]] || [subDur integerValue] <= 0) {
-                NSLog(@"[PatchZero] Patched JSON field premiumSubscriptionDuration: %@ -> 999999999", subDur ?: @"<absent>");
-                result[@"premiumSubscriptionDuration"] = @999999999;
+            if ([subDur isKindOfClass:[NSString class]] && [(NSString *)subDur length] > 0) {
+                long long val = [(NSString *)subDur longLongValue];
+                if (val <= 0) {
+                    NSLog(@"[PatchZero] Patched JSON field premiumSubscriptionDuration: %@ -> 999999999", subDur);
+                    result[@"premiumSubscriptionDuration"] = @"999999999";
+                }
+            } else if ([subDur isKindOfClass:[NSNumber class]]) {
+                NSLog(@"[PatchZero] Patched JSON field premiumSubscriptionDuration: %@ -> string 999999999", subDur);
+                result[@"premiumSubscriptionDuration"] = @"999999999";
             }
 
             for (NSString *dateKey in @[@"proEndDate", @"vipEndDate"]) {

@@ -275,13 +275,15 @@ static void patchzero_arm_minimize_guard(double seconds) {
 @implementation NSWindow (PatchZeroRestoreAfterTamperHide)
 
 - (void)patched_orderOut:(id)sender {
+    // ONLY the main window: restoring every tracked window (previous
+    // behavior) fought the app's own legitimate UI window juggling during
+    // sync — it orderOuts the task list's host window as part of a redraw
+    // and our restore desynced the UI state, leaving the list unrendered.
     BOOL isTamperHide = gPatchZeroMinimizeGuardArmed
-        && [self windowNumber] >= 0
-        && [self windowNumber] != gPatchZeroSuppressedWindowNumber
-        && (patchzero_is_window_number_tracked([self windowNumber]) || self.isVisible);
+        && self == [[NSApplication sharedApplication] mainWindow];
     [self patched_orderOut:sender];
     if (isTamperHide) {
-        NSLog(@"[PatchZero] Tamper check ordered out window %ld; restoring same turn.", (long)[self windowNumber]);
+        NSLog(@"[PatchZero] Tamper check ordered out main window %ld; restoring same turn.", (long)[self windowNumber]);
         [self orderFront:nil];
         if ([[NSApplication sharedApplication] isActive]) {
             [self makeKeyWindow];
@@ -688,9 +690,15 @@ static void patch_init() {
         patchzero_install_menu_protection();
         patchzero_install_window_guards();
         // Snapshot timer: keep the tracked-window list fresh so the reopen
-        // pass knows which windows were legitimately on screen.
+        // pass knows which windows were legitimately on screen. Every 4th
+        // tick (~2s) also re-enable menu items — the tamper check greys them
+        // out periodically, not just at launch.
+        __block int tickCount = 0;
         [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
             patchzero_snapshot_visible_windows();
+            if (++tickCount % 4 == 0) {
+                patchzero_enable_menu_items([NSApplication sharedApplication].mainMenu);
+            }
         }];
         // Arm the minimize guard for the first seconds after launch: the
         // tamper check fires its first tick right around login/sync.

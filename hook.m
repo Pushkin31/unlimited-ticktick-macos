@@ -275,15 +275,25 @@ static void patchzero_arm_minimize_guard(double seconds) {
 @implementation NSWindow (PatchZeroRestoreAfterTamperHide)
 
 - (void)patched_orderOut:(id)sender {
-    // ONLY the main window: restoring every tracked window (previous
-    // behavior) fought the app's own legitimate UI window juggling during
-    // sync — it orderOuts the task list's host window as part of a redraw
-    // and our restore desynced the UI state, leaving the list unrendered.
-    BOOL isTamperHide = gPatchZeroMinimizeGuardArmed
+    BOOL wasArmed = gPatchZeroMinimizeGuardArmed
         && self == [[NSApplication sharedApplication] mainWindow];
     [self patched_orderOut:sender];
-    if (isTamperHide) {
-        NSLog(@"[PatchZero] Tamper check ordered out main window %ld; restoring same turn.", (long)[self windowNumber]);
+    if (!wasArmed) {
+        return;
+    }
+    // Restore ONLY if the app is now completely windowless — that is the
+    // tamper-check fold. Legit UI flows (section switches, redraws) also
+    // orderOut windows transiently while other windows stay visible; forcing
+    // those back desynced the UI and blanked the task list.
+    BOOL anyVisible = NO;
+    for (NSWindow *w in [NSApplication sharedApplication].windows) {
+        if (w.isVisible && !w.isMiniaturized) {
+            anyVisible = YES;
+            break;
+        }
+    }
+    if (!anyVisible) {
+        NSLog(@"[PatchZero] Tamper check left app windowless; restoring main window %ld same turn.", (long)[self windowNumber]);
         [self orderFront:nil];
         if ([[NSApplication sharedApplication] isActive]) {
             [self makeKeyWindow];

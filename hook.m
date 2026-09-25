@@ -490,56 +490,32 @@ static id patchzero_patch_json_object(id obj) {
             result[key] = patchzero_patch_json_object(dict[key]);
         }
 
-        BOOL looksLikeUser =
-               result[@"proEndDate"] != nil
-            || result[@"premiumPaymentType"] != nil
-            || result[@"premiumSubscriptionDuration"] != nil
-            || result[@"needsRenew"] != nil;
-
-        if (looksLikeUser) {
-            for (NSString *proKey in @[@"isPro", @"isTeamPro", @"isActiveTeamUser", @"isPremium"]) {
-                if (result[proKey] == nil || ![result[proKey] isEqual:@YES]) {
-                    NSLog(@"[PatchZero] Patched JSON field %@: %@ -> true", proKey, result[proKey] ?: @"<absent>");
-                    result[proKey] = @YES;
-                }
+        // Upstream semantics (proven on 8.2.20 by the c0afc96 build: premium
+        // worked AND tasks survived sync): only rewrite keys the server
+        // actually sent. Injecting ABSENT keys (isPro/isPremium/
+        // premiumPaymentType) made every profile poll look "changed", the
+        // sync engine rebuilt local data, and the task list vanished after
+        // the first sync. Premium is held by the sqlite read interpose
+        // (ZTTUSER.ZISPRO) — that is the layer gating the UI on 8.2.20.
+        for (NSString *proKey in @[@"isPro", @"isTeamPro", @"isActiveTeamUser"]) {
+            if (result[proKey] != nil && ![result[proKey] isEqual:@YES]) {
+                NSLog(@"[PatchZero] Patched JSON field %@: %@ -> true", proKey, result[proKey]);
+                result[proKey] = @YES;
             }
+        }
 
-            id payType = result[@"premiumPaymentType"];
-            if (payType == nil || [payType isEqual:[NSNull null]] || ([payType isKindOfClass:[NSString class]] && [(NSString *)payType length] == 0)) {
-                NSLog(@"[PatchZero] Patched JSON field premiumPaymentType: %@ -> Yearly", payType ?: @"<absent>");
-                result[@"premiumPaymentType"] = @"Yearly";
-            }
-
-            // premiumSubscriptionDuration is String? in TTUserDTO (DB column
-            // ZPREMIUMSUBSCRIPTIONDURATION is VARCHAR). Injecting a NUMBER here
-            // made Swift Codable fail decoding the whole sync response — that
-            // is why tasks vanished after the first sync. Only fix up the value
-            // when the server actually sent one, and keep the type String.
-            id subDur = result[@"premiumSubscriptionDuration"];
-            if ([subDur isKindOfClass:[NSString class]] && [(NSString *)subDur length] > 0) {
-                long long val = [(NSString *)subDur longLongValue];
-                if (val <= 0) {
-                    NSLog(@"[PatchZero] Patched JSON field premiumSubscriptionDuration: %@ -> 999999999", subDur);
-                    result[@"premiumSubscriptionDuration"] = @"999999999";
-                }
-            } else if ([subDur isKindOfClass:[NSNumber class]]) {
-                NSLog(@"[PatchZero] Patched JSON field premiumSubscriptionDuration: %@ -> string 999999999", subDur);
-                result[@"premiumSubscriptionDuration"] = @"999999999";
-            }
-
-            for (NSString *dateKey in @[@"proEndDate", @"vipEndDate"]) {
-                id original = result[dateKey];
-                if ([original isKindOfClass:[NSString class]]) {
-                    NSLog(@"[PatchZero] Patched JSON field %@: %@ -> 2098-12-13", dateKey, original);
-                    result[dateKey] = @"2098-12-13T00:00:00.000+0000";
-                } else if ([original isKindOfClass:[NSNumber class]]) {
-                    double magnitude = [original doubleValue];
-                    BOOL looksLikeMilliseconds = fabs(magnitude) > 1e11;
-                    NSLog(@"[PatchZero] Patched JSON field %@: %@ -> 2098-12-13", dateKey, original);
-                    result[dateKey] = looksLikeMilliseconds
-                        ? @(kPatchZeroForcedProEndDateSeconds * 1000.0)
-                        : @(kPatchZeroForcedProEndDateSeconds);
-                }
+        for (NSString *dateKey in @[@"proEndDate", @"vipEndDate"]) {
+            id original = result[dateKey];
+            if ([original isKindOfClass:[NSString class]]) {
+                NSLog(@"[PatchZero] Patched JSON field %@: %@ -> 2098-12-13", dateKey, original);
+                result[dateKey] = @"2098-12-13T00:00:00.000+0000";
+            } else if ([original isKindOfClass:[NSNumber class]]) {
+                double magnitude = [original doubleValue];
+                BOOL looksLikeMilliseconds = fabs(magnitude) > 1e11;
+                NSLog(@"[PatchZero] Patched JSON field %@: %@ -> 2098-12-13", dateKey, original);
+                result[dateKey] = looksLikeMilliseconds
+                    ? @(kPatchZeroForcedProEndDateSeconds * 1000.0)
+                    : @(kPatchZeroForcedProEndDateSeconds);
             }
         }
 

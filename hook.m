@@ -293,18 +293,11 @@ static void patchzero_arm_minimize_guard(double seconds) {
         }
     }
     if (!anyVisible) {
-        // Restore on the NEXT runloop turn, NOT inside this orderOut call:
-        // same-turn orderFront broke the CATransaction — window came back but
-        // its layer stayed blank (tasks clickable yet invisible). The proven
-        // c0afc96 build restored on a delayed turn and rendered fine.
-        NSLog(@"[PatchZero] Tamper check left app windowless; restoring main window next turn.");
-        NSWindow *win = self;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [win orderFront:nil];
-            if ([[NSApplication sharedApplication] isActive]) {
-                [win makeKeyWindow];
-            }
-        });
+        NSLog(@"[PatchZero] Tamper check left app windowless; restoring main window %ld same turn.", (long)[self windowNumber]);
+        [self orderFront:nil];
+        if ([[NSApplication sharedApplication] isActive]) {
+            [self makeKeyWindow];
+        }
     }
 }
 
@@ -702,6 +695,18 @@ static void patch_init() {
             patchzero_snapshot_visible_windows();
             if (++tickCount % 4 == 0) {
                 patchzero_enable_menu_items([NSApplication sharedApplication].mainMenu);
+            }
+            // At launch the tamper check hides the WHOLE APP ([NSApp hide:]),
+            // which no orderOut hook ever sees — that's the "starts folded,
+            // user must reopen manually" symptom. While the guard is armed
+            // (8s after launch, 3s after each suppressed alert), undo it.
+            if (gPatchZeroMinimizeGuardArmed && [[NSApplication sharedApplication] isHidden]) {
+                NSLog(@"[PatchZero] App hidden by tamper check, unhiding.");
+                [[NSApplication sharedApplication] unhide:nil];
+                NSWindow *mainW = [[NSApplication sharedApplication] mainWindow];
+                if (mainW) {
+                    [mainW orderFront:nil];
+                }
             }
         }];
         // Arm the minimize guard for the first seconds after launch: the

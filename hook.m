@@ -258,17 +258,13 @@ static void patchzero_arm_minimize_guard(double seconds) {
     });
 }
 
-@implementation NSWindow (PatchZeroBlockMinimize)
-
-- (void)patched_miniaturize:(id)sender {
-    if (gPatchZeroMinimizeGuardArmed) {
-        NSLog(@"[PatchZero] Minimize guard: blocked miniaturize: on window %ld.", (long)[self windowNumber]);
-        return;
-    }
-    [self patched_miniaturize:sender];
-}
-
-@end
+// NOTE: the old "block miniaturize while armed" hook was REMOVED. On 8.2.20
+// the guard was armed nearly continuously (alerts fire every few seconds),
+// which made Dock-icon minimize stop working entirely, and the
+// DidMiniaturize notification guard fought the user's own minimize, causing
+// a visible flicker on restore. The tamper check on this version hides the
+// whole app via [NSApp hide:], not via miniaturize — so the unhide pass in
+// the snapshot timer is the only window handling needed.
 
 // ── orderOut same-turn restore (main window only) ───────────────────────────
 
@@ -304,25 +300,11 @@ static void patchzero_arm_minimize_guard(double seconds) {
 @end
 
 static void patchzero_install_minimize_guard(void) {
-    [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidMiniaturizeNotification
-                                                      object:nil
-                                                       queue:[NSOperationQueue mainQueue]
-                                                  usingBlock:^(NSNotification *note) {
-        if (!gPatchZeroMinimizeGuardArmed) {
-            return;
-        }
-        NSWindow *window = [note object];
-        if (![window isKindOfClass:[NSWindow class]] || !window.isMiniaturized) {
-            return;
-        }
-        if ([window windowNumber] == gPatchZeroSuppressedWindowNumber) {
-            return;
-        }
-        NSLog(@"[PatchZero] Minimize guard: restoring window %ld minimized by tamper check.", (long)[window windowNumber]);
-        [window deminiaturize:nil];
-        [window orderFront:nil];
-    }];
-    NSLog(@"[PatchZero] Installed window minimize guard.");
+    // Removed: the DidMiniaturize observer deminiaturized the user's own
+    // minimize (flicker on Dock restore). The tamper check on 8.2.20 does
+    // not miniaturize windows — it hides the whole app — handled by the
+    // unhide pass in the snapshot timer.
+    NSLog(@"[PatchZero] Minimize guard intentionally not installed (would fight user minimize).");
 }
 
 // ── Alert suppression ───────────────────────────────────────────────────────
@@ -449,19 +431,11 @@ static void patchzero_install_menu_protection(void) {
 
 static void patchzero_install_window_guards(void) {
     Class cls = [NSWindow class];
-    Method origMini = class_getInstanceMethod(cls, @selector(miniaturize:));
-    Method replMini = class_getInstanceMethod(cls, @selector(patched_miniaturize:));
-    if (origMini && replMini) {
-        method_exchangeImplementations(origMini, replMini);
-        NSLog(@"[PatchZero] Hooked NSWindow miniaturize: (block-while-armed).");
-    } else {
-        NSLog(@"[PatchZero] WARNING: could not hook NSWindow miniaturize:.");
-    }
     Method origOut = class_getInstanceMethod(cls, @selector(orderOut:));
     Method replOut = class_getInstanceMethod(cls, @selector(patched_orderOut:));
     if (origOut && replOut) {
         method_exchangeImplementations(origOut, replOut);
-        NSLog(@"[PatchZero] Hooked NSWindow orderOut: (instant restore).");
+        NSLog(@"[PatchZero] Hooked NSWindow orderOut: (windowless-app restore).");
     } else {
         NSLog(@"[PatchZero] WARNING: could not hook NSWindow orderOut:.");
     }

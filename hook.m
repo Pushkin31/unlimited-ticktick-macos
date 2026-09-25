@@ -247,31 +247,27 @@ static void patchzero_reopen_windows_shortly(void) {
     });
 }
 
-// ── Minimize guard (armed after each suppression + at startup) ──────────────
+// ── Launch-phase fold recovery ───────────────────────────────────────────────
+// The tamper check folds the app at LAUNCH: right after the first suppressed
+// alert the main window ends up miniaturized in the Dock (log evidence: no
+// orderOut, no NSApp-hide — the unhide pass never fired, and removing the
+// miniaturize handling let the fold through). After launch the app is never
+// folded again (verified on 79a21ce: "дальше вроде норм работает").
+// So all window recovery is confined to the first 20 seconds of process
+// life; afterwards the dylib never touches windows, and Dock-click hide /
+// yellow button / Cmd+M work natively.
 
-static volatile BOOL gPatchZeroMinimizeGuardArmed = NO;
+static NSDate *gPatchZeroLaunchTime = nil;
 
-static void patchzero_arm_minimize_guard(double seconds) {
-    gPatchZeroMinimizeGuardArmed = YES;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        gPatchZeroMinimizeGuardArmed = NO;
-    });
+static BOOL patchzero_in_launch_window(void) {
+    return gPatchZeroLaunchTime != nil
+        && [[NSDate date] timeIntervalSinceDate:gPatchZeroLaunchTime] < 20.0;
 }
-
-// NOTE: the old "block miniaturize while armed" hook was REMOVED. On 8.2.20
-// the guard was armed nearly continuously (alerts fire every few seconds),
-// which made Dock-icon minimize stop working entirely, and the
-// DidMiniaturize notification guard fought the user's own minimize, causing
-// a visible flicker on restore. The tamper check on this version hides the
-// whole app via [NSApp hide:], not via miniaturize — so the unhide pass in
-// the snapshot timer is the only window handling needed.
-
-// ── orderOut same-turn restore (main window only) ───────────────────────────
 
 @implementation NSWindow (PatchZeroRestoreAfterTamperHide)
 
 - (void)patched_orderOut:(id)sender {
-    BOOL wasArmed = gPatchZeroMinimizeGuardArmed
+    BOOL wasArmed = patchzero_in_launch_window()
         && self == [[NSApplication sharedApplication] mainWindow];
     [self patched_orderOut:sender];
     if (!wasArmed) {
@@ -300,11 +296,30 @@ static void patchzero_arm_minimize_guard(double seconds) {
 @end
 
 static void patchzero_install_minimize_guard(void) {
-    // Removed: the DidMiniaturize observer deminiaturized the user's own
-    // minimize (flicker on Dock restore). The tamper check on 8.2.20 does
-    // not miniaturize windows — it hides the whole app — handled by the
-    // unhide pass in the snapshot timer.
-    NSLog(@"[PatchZero] Minimize guard intentionally not installed (would fight user minimize).");
+    // Launch-phase only: if the main window gets miniaturized within the
+    // first 20s (the tamper fold), bring it back. After the launch window
+    // expires this observer does nothing — user minimize stays untouched.
+    [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidMiniaturizeNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification *note) {
+        if (!patchzero_in_launch_window()) {
+            return;
+        }
+        NSWindow *window = [note object];
+        if (![window isKindOfClass:[NSWindow class]] || !window.isMiniaturized) {
+            return;
+        }
+        if (window != [[NSApplication sharedApplication] mainWindow]) {
+            return; // only the main window is the fold victim
+        }
+        if ([window windowNumber] == gPatchZeroSuppressedWindowNumber) {
+            return; // the alert's own window, leave it
+        }
+        NSLog(@"[PatchZero] Launch fold: main window miniaturized, restoring.");
+        [window deminiaturize:nil];
+    }];
+    NSLog(@"[PatchZero] Installed launch-phase minimize recovery (20s).");
 }
 
 // ── Alert suppression ───────────────────────────────────────────────────────
@@ -335,8 +350,6 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Stop (no button action).");
         patchzero_hide_suppressed_alert_window(self);
         patchzero_arm_termination_block();
-        patchzero_arm_minimize_guard(3.0);
-        patchzero_reopen_windows_shortly();
         return NSModalResponseStop;
     }
     return [self patched_runModal];
@@ -347,8 +360,6 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
         NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Stop (no button action).");
         patchzero_hide_suppressed_alert_window(self);
         patchzero_arm_termination_block();
-        patchzero_arm_minimize_guard(3.0);
-        patchzero_reopen_windows_shortly();
         if (handler) {
             handler(NSModalResponseStop);
         }
@@ -651,6 +662,7 @@ static void patchzero_install_container_redirect(void) {
 
 __attribute__((constructor))
 static void patch_init() {
+    gPatchZeroLaunchTime = [NSDate date];
     NSLog(@"[PatchZero] Hooking...");
     patchzero_install_container_redirect();
     patchzero_install_json_patch();
@@ -670,11 +682,9 @@ static void patch_init() {
             if (++tickCount % 4 == 0) {
                 patchzero_enable_menu_items([NSApplication sharedApplication].mainMenu);
             }
-            // At launch the tamper check hides the WHOLE APP ([NSApp hide:]),
-            // which no orderOut hook ever sees — that's the "starts folded,
-            // user must reopen manually" symptom. While the guard is armed
-            // (8s after launch, 3s after each suppressed alert), undo it.
-            if (gPatchZeroMinimizeGuardArmed && [[NSApplication sharedApplication] isHidden]) {
+            // At launch the tamper check can also hide the WHOLE APP
+            // ([NSApp hide:]); undo it during the launch window only.
+            if (patchzero_in_launch_window() && [[NSApplication sharedApplication] isHidden]) {
                 NSLog(@"[PatchZero] App hidden by tamper check, unhiding.");
                 [[NSApplication sharedApplication] unhide:nil];
                 NSWindow *mainW = [[NSApplication sharedApplication] mainWindow];
@@ -683,9 +693,6 @@ static void patch_init() {
                 }
             }
         }];
-        // Arm the minimize guard for the first seconds after launch: the
-        // tamper check fires its first tick right around login/sync.
-        patchzero_arm_minimize_guard(8.0);
         NSLog(@"[PatchZero] Installed Cmd+Q safety valve, menu protection, window guards.");
     });
 }

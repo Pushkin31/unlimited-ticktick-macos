@@ -198,6 +198,36 @@ static BOOL patchzero_is_window_number_tracked(NSInteger windowNumber) {
     return NO;
 }
 
+// Universal launch-fold sweep: the 20:35 log proved the startup fold bypasses
+// ALL three traps (no orderOut line, no DidMiniaturize hit — the observer's
+// mainWindow check skipped it because mainWindow is nil during the fold, no
+// isHidden). Instead of guessing which AppKit call the tamper check uses,
+// diff reality against the 0.5s snapshot: any window that WAS visible and is
+// now miniaturized/hidden gets brought back. Runs only in the 20s launch
+// window and stands down on Cmd+Q.
+static void patchzero_launch_fold_sweep(void) {
+    NSApplication *app = [NSApplication sharedApplication];
+    if ([app isHidden]) {
+        NSLog(@"[PatchZero] Launch sweep: app hidden, unhiding.");
+        [app unhide:nil];
+    }
+    for (NSWindow *window in app.windows) {
+        if ([window windowNumber] == gPatchZeroSuppressedWindowNumber) {
+            continue; // the suppressed alert's own empty window
+        }
+        if (!patchzero_is_window_number_tracked(window.windowNumber)) {
+            continue; // was not visible in the snapshot — user's own doing
+        }
+        if (window.isMiniaturized) {
+            NSLog(@"[PatchZero] Launch sweep: window %ld was folded to Dock, restoring.", (long)window.windowNumber);
+            [window deminiaturize:nil];
+        } else if (!window.isVisible) {
+            NSLog(@"[PatchZero] Launch sweep: window %ld was ordered out, restoring.", (long)window.windowNumber);
+            [window orderFront:nil];
+        }
+    }
+}
+
 static void patchzero_restore_activation_and_menu(void) {
     NSApplication *app = [NSApplication sharedApplication];
     if (app.activationPolicy != NSApplicationActivationPolicyRegular) {
@@ -258,6 +288,10 @@ static void patchzero_reopen_windows_shortly(void) {
 // yellow button / Cmd+M work natively.
 
 static NSDate *gPatchZeroLaunchTime = nil;
+// Set when the user pressed Cmd+Q: all window-recovery paths must stand down,
+// otherwise the orderOut restore pulls the window back on screen WHILE the app
+// is quitting (seen in the 20:36 log: "Cmd+Q" followed by "restoring main window").
+static volatile BOOL gPatchZeroQuitting = NO;
 
 static BOOL patchzero_in_launch_window(void) {
     return gPatchZeroLaunchTime != nil
@@ -267,7 +301,7 @@ static BOOL patchzero_in_launch_window(void) {
 @implementation NSWindow (PatchZeroRestoreAfterTamperHide)
 
 - (void)patched_orderOut:(id)sender {
-    BOOL wasArmed = patchzero_in_launch_window()
+    BOOL wasArmed = patchzero_in_launch_window() && !gPatchZeroQuitting
         && self == [[NSApplication sharedApplication] mainWindow];
     [self patched_orderOut:sender];
     if (!wasArmed) {
@@ -470,6 +504,7 @@ static void patchzero_install_quit_safety_valve(void) {
         BOOL isCommandQ = (event.modifierFlags & NSEventModifierFlagCommand)
             && (event.keyCode == 12);
         if (isCommandQ) {
+            gPatchZeroQuitting = YES;
             NSLog(@"[PatchZero] Cmd+Q seen (keyCode 12); will force-quit in 1s if the app hasn't quit by itself.");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 NSLog(@"[PatchZero] App still alive 1s after Cmd+Q; forcing exit.");
@@ -685,13 +720,18 @@ static void patch_init() {
         // out periodically, not just at launch.
         __block int tickCount = 0;
         [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
+            // ORDER MATTERS: sweep against the PREVIOUS snapshot first (that's
+            // the diff that catches the fold), then refresh the snapshot.
+            if (patchzero_in_launch_window() && !gPatchZeroQuitting) {
+                patchzero_launch_fold_sweep();
+            }
             patchzero_snapshot_visible_windows();
             if (++tickCount % 4 == 0) {
                 patchzero_enable_menu_items([NSApplication sharedApplication].mainMenu);
             }
             // At launch the tamper check can also hide the WHOLE APP
             // ([NSApp hide:]); undo it during the launch window only.
-            if (patchzero_in_launch_window() && [[NSApplication sharedApplication] isHidden]) {
+            if (patchzero_in_launch_window() && !gPatchZeroQuitting && [[NSApplication sharedApplication] isHidden]) {
                 NSLog(@"[PatchZero] App hidden by tamper check, unhiding.");
                 [[NSApplication sharedApplication] unhide:nil];
                 NSWindow *mainW = [[NSApplication sharedApplication] mainWindow];

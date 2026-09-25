@@ -254,34 +254,6 @@ static void patchzero_install_window_restore(void) {
     }
 }
 
-static void patchzero_install_piracy_warning_suppression(void) {
-    Class cls = [NSAlert class];
-    SEL originalSelectors[] = {
-        @selector(runModal),
-        @selector(beginSheetModalForWindow:completionHandler:)
-    };
-    SEL patchedSelectors[] = {
-        @selector(patched_runModal),
-        @selector(patched_beginSheetModalForWindow:completionHandler:)
-    };
-    for (int i = 0; i < 2; i++) {
-        Method originalMethod = class_getInstanceMethod(cls, originalSelectors[i]);
-        Method patchedMethod = class_getInstanceMethod(cls, patchedSelectors[i]);
-        if (originalMethod && patchedMethod) {
-            method_exchangeImplementations(originalMethod, patchedMethod);
-        }
-    }
-
-    Class workspaceCls = [NSWorkspace class];
-    Method originalOpenURL = class_getInstanceMethod(workspaceCls, @selector(openURL:));
-    Method patchedOpenURL = class_getInstanceMethod(workspaceCls, @selector(patched_openURL:));
-    if (originalOpenURL && patchedOpenURL) {
-        method_exchangeImplementations(originalOpenURL, patchedOpenURL);
-    }
-
-    NSLog(@"[PatchZero] Hooked NSAlert to suppress the piracy warning.");
-}
-
 // ── Container redirect ──────────────────────────────────────────────────────
 
 static NSString *patchzero_redirected_group_path(NSString *groupIdentifier) {

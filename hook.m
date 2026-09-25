@@ -297,17 +297,21 @@ static void patchzero_restore_startup_window(void) {
         return;
     }
     gPatchZeroStartupWindowRecoveryScheduled = YES;
-    // The first alert can be handled before TickTick assigns mainWindow. Keep
-    // looking briefly instead of giving up on the first nil result.
+    // The integrity check may hide the app asynchronously, after the first
+    // recovery pass. Observe startup for up to 15 seconds.
     __block int attempts = 0;
     NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *timer) {
-        if (gPatchZeroQuitting || !patchzero_in_launch_window() || ++attempts > 12) {
+        if (gPatchZeroQuitting || !patchzero_in_launch_window() || ++attempts > 60) {
             [timer invalidate];
             return;
         }
 
         NSApplication *app = [NSApplication sharedApplication];
-        [app unhideWithoutActivation];
+        if (app.isHidden) {
+            NSLog(@"[PatchZero] Startup integrity check hid application; unhiding it.");
+            [app unhideWithoutActivation];
+        }
+
         NSWindow *target = app.mainWindow;
         if (!target) {
             for (NSWindow *window in app.windows) {
@@ -330,9 +334,6 @@ static void patchzero_restore_startup_window(void) {
         } else if (!target.isVisible) {
             NSLog(@"[PatchZero] Startup integrity check hid window; restoring it.");
             [target orderFrontRegardless];
-        }
-        if (target.isVisible && !target.isMiniaturized) {
-            [timer invalidate];
         }
     }];
     [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];

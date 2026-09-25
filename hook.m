@@ -347,21 +347,28 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
 
 - (NSModalResponse)patched_runModal {
     if (patchzero_alert_is_piracy_warning(self)) {
-        NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Stop (no button action).");
+        // Answer with the FIRST BUTTON ("Download TickTick"), not Stop: with
+        // NSModalResponseStop the caller's handler did not recognize the
+        // response and re-showed the alert in a ~150ms loop — a modal storm
+        // that pegged the main thread (Dock clicks dead, app left folded).
+        // FirstButtonReturn is accepted by the handler and ends the cycle;
+        // its side effects (App Store URL, main-window orderOut) are already
+        // suppressed/restored by our other hooks.
+        NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering first button.");
         patchzero_hide_suppressed_alert_window(self);
         patchzero_arm_termination_block();
-        return NSModalResponseStop;
+        return NSAlertFirstButtonReturn;
     }
     return [self patched_runModal];
 }
 
 - (void)patched_beginSheetModalForWindow:(NSWindow *)sheetWindow completionHandler:(void (^)(NSModalResponse returnCode))handler {
     if (patchzero_alert_is_piracy_warning(self)) {
-        NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Stop (no button action).");
+        NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering first button.");
         patchzero_hide_suppressed_alert_window(self);
         patchzero_arm_termination_block();
         if (handler) {
-            handler(NSModalResponseStop);
+            handler(NSAlertFirstButtonReturn);
         }
         return;
     }

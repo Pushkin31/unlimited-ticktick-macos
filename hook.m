@@ -255,17 +255,16 @@ static void patchzero_arm_startup_orderout_guard(void) {
     BOOL isStartupWindow = gPatchZeroBlockStartupOrderOut && patchzero_in_launch_window()
         && !gPatchZeroQuitting && [self windowNumber] != gPatchZeroSuppressedWindowNumber
         && ![self isKindOfClass:[NSPanel class]] && (self.styleMask & NSWindowStyleMaskTitled);
-    [self patched_orderOut:sender];
     if (isStartupWindow) {
-        // Let AppKit complete the transaction before restoring the window.
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (!gPatchZeroQuitting && patchzero_in_launch_window() && !self.isMiniaturized) {
-                NSLog(@"[PatchZero] Restoring startup window and focus after orderOut.");
-                [self orderFront:nil];
-                [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
-                [self makeKeyWindow];
-            }
-        });
+        // Keep the hide/restore pair out of the rendered frame. AppKit still
+        // receives both operations, unlike the old early-return guard.
+        NSLog(@"[PatchZero] Restoring startup window without visible orderOut.");
+        NSDisableScreenUpdates();
+        [self patched_orderOut:sender];
+        [self orderFront:nil];
+        [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+        [self makeKeyWindow];
+        NSEnableScreenUpdates();
         return;
     }
     BOOL wasArmed = patchzero_in_launch_window() && !gPatchZeroQuitting

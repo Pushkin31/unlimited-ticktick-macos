@@ -4,13 +4,17 @@
 #import <sqlite3.h>
 #import <strings.h>
 
-// ── Minimal PatchZero dylib: container redirect + JSON patch + surgical sqlite
-// isPro read interpose + piracy alert suppression + App Store URL swallow +
-// activation policy pin + main menu protection + same-turn window restore.
-// No window close/miniaturize hooks, no neuter, no diagnostics — those were
-// breaking rendering and the menu bar. This is the proven-stable baseline.
+// PatchZero — final configuration (proven combo):
+//   1. container redirect (writable Group Container for ad-hoc signing)
+//   2. JSON wire patch (isPro/premium fields on the profile response)
+//   3. surgical sqlite read interpose (premium from the LOCAL GRDB store)
+//   4. piracy alert suppression (41 localized titles, answered with Stop)
+//   5. full tamper-check guard layer transplanted from the proven 7371eae
+//      build: window snapshot, menu protection + item re-enable, activation
+//      policy pin, NSApp unhide, minimize guard, orderOut same-turn restore,
+//      termination block, Cmd+Q safety valve.
 
-// ── Piracy alert suppression ─────────────────────────────────────────────────
+// ── Piracy alert detection ───────────────────────────────────────────────────
 
 static NSString *const kPatchZeroPiracyTitles[] = {
     @"Anwendung nicht lizenziert.",
@@ -82,13 +86,263 @@ static BOOL patchzero_alert_is_piracy_warning(NSAlert *alert) {
     return mentionsTickTickInInfo && piracyKeyword;
 }
 
-// Answer NSModalResponseStop (-1000): no button matches, so the handler runs
-// none of its branches — no App Store open, no window hide, no terminate.
+// ── Termination block (armed briefly after each suppression) ────────────────
+
+static volatile BOOL patchzero_block_termination = NO;
+
+static void patchzero_arm_termination_block(void) {
+    patchzero_block_termination = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        patchzero_block_termination = NO;
+    });
+}
+
+@implementation NSApplication (PatchZeroBlockForcedQuit)
+
+- (void)patched_terminate:(id)sender {
+    if (patchzero_block_termination) {
+        NSLog(@"[PatchZero] Blocked an app termination request during the post-alert window.");
+        return;
+    }
+    [self patched_terminate:sender];
+}
+
+@end
+
+// ── Main menu protection ─────────────────────────────────────────────────────
+
+static NSMenu *gPatchZeroProtectedMenu = nil;
+
+@implementation NSApplication (PatchZeroProtectMainMenu)
+
+- (void)patched_setMainMenu:(NSMenu *)menu {
+    if (menu == nil || menu.numberOfItems == 0) {
+        if (gPatchZeroProtectedMenu != nil && [self mainMenu] != gPatchZeroProtectedMenu) {
+            NSLog(@"[PatchZero] Blocked clearing of main menu (tamper check), restoring.");
+            [self patched_setMainMenu:gPatchZeroProtectedMenu];
+        }
+        return; // refuse to clear the menu
+    }
+    if (gPatchZeroProtectedMenu == nil) {
+        gPatchZeroProtectedMenu = [menu retain];
+    }
+    [self patched_setMainMenu:menu];
+}
+
+@end
+
+// Re-enable every menu item that has an action (recursively through submenus).
+// The tamper check disables items via setEnabled:NO; called on each
+// suppression so the menu bar comes back alive.
+static void patchzero_enable_menu_items(NSMenu *menu) {
+    if (menu == nil) {
+        return;
+    }
+    for (NSMenuItem *item in [menu itemArray]) {
+        if (item.hasSubmenu) {
+            patchzero_enable_menu_items(item.submenu);
+        }
+        if (item.action != NULL) {
+            item.enabled = YES;
+        }
+    }
+}
+
+// ── Activation policy pin ────────────────────────────────────────────────────
+
+@implementation NSApplication (PatchZeroProtectActivationPolicy)
+
+- (void)patched_setActivationPolicy:(NSApplicationActivationPolicy)policy {
+    if (policy != NSApplicationActivationPolicyRegular) {
+        NSLog(@"[PatchZero] Blocked setActivationPolicy:%ld (tamper check), keeping Regular.", (long)policy);
+        policy = NSApplicationActivationPolicyRegular;
+    }
+    [self patched_setActivationPolicy:policy];
+}
+
+@end
+
+// ── Window snapshot + reopen pass (transplanted from proven 7371eae) ────────
+
+// Window number of the last suppressed piracy alert, kept so the reopen pass
+// does not raise an empty NSAlert window over the app's real UI.
+static NSInteger gPatchZeroSuppressedWindowNumber = 0;
+
+// Rolling snapshot of window numbers that are actually visible and not
+// miniaturized, refreshed every 0.5s. The reopen pass uses this to
+// distinguish "windows the tamper check just hid" (show them again) from
+// "windows the user closed/minimized on purpose" (leave them alone).
+#define kPatchZeroMaxTrackedWindows 64
+static NSInteger gPatchZeroTrackedWindowNumbers[kPatchZeroMaxTrackedWindows];
+static int gPatchZeroTrackedWindowCount = 0;
+
+static void patchzero_snapshot_visible_windows(void) {
+    gPatchZeroTrackedWindowCount = 0;
+    for (NSWindow *window in [NSApplication sharedApplication].windows) {
+        if (!window.isVisible || window.isMiniaturized) {
+            continue;
+        }
+        if (gPatchZeroTrackedWindowCount >= kPatchZeroMaxTrackedWindows) {
+            break;
+        }
+        gPatchZeroTrackedWindowNumbers[gPatchZeroTrackedWindowCount++] = window.windowNumber;
+    }
+}
+
+static BOOL patchzero_is_window_number_tracked(NSInteger windowNumber) {
+    for (int i = 0; i < gPatchZeroTrackedWindowCount; i++) {
+        if (gPatchZeroTrackedWindowNumbers[i] == windowNumber) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static void patchzero_restore_activation_and_menu(void) {
+    NSApplication *app = [NSApplication sharedApplication];
+    if (app.activationPolicy != NSApplicationActivationPolicyRegular) {
+        NSLog(@"[PatchZero] Tamper check left app non-regular activation policy, restoring.");
+        app.activationPolicy = NSApplicationActivationPolicyRegular;
+    }
+    if (gPatchZeroProtectedMenu != nil && app.mainMenu != gPatchZeroProtectedMenu) {
+        NSLog(@"[PatchZero] Main menu was swapped out, restoring captured menu.");
+        [app setMainMenu:gPatchZeroProtectedMenu];
+    }
+    patchzero_enable_menu_items(gPatchZeroProtectedMenu);
+}
+
+static void patchzero_reopen_windows_shortly(void) {
+    BOOL snapshotEmpty = (gPatchZeroTrackedWindowCount == 0);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        patchzero_restore_activation_and_menu();
+        // The tamper check can hide the whole app (NSApp hide:) instead of
+        // just windows; bring it back so the UI actually reappears.
+        if ([[NSApplication sharedApplication] isHidden]) {
+            NSLog(@"[PatchZero] App hidden by tamper check, unhiding.");
+            [[NSApplication sharedApplication] unhide:nil];
+        }
+        for (NSWindow *window in [NSApplication sharedApplication].windows) {
+            // Skip the suppressed piracy alert's own (empty) window.
+            if ([window windowNumber] == gPatchZeroSuppressedWindowNumber) {
+                continue;
+            }
+            if (!snapshotEmpty && !patchzero_is_window_number_tracked(window.windowNumber)) {
+                continue;
+            }
+            if (snapshotEmpty && !window.isVisible && !window.isMiniaturized) {
+                continue;
+            }
+            if (window.isMiniaturized) {
+                [window deminiaturize:nil];
+            }
+            // Show without touching the key window: makeKeyAndOrderFront here
+            // stole focus from a window the user just opened.
+            [window orderFront:nil];
+        }
+        // Reactivate only if the app was already active: unconditional
+        // activateIgnoringOtherApps:YES stole focus on every tamper tick.
+        if ([[NSApplication sharedApplication] isActive]) {
+            [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+        }
+    });
+}
+
+// ── Minimize guard (armed after each suppression + at startup) ──────────────
+
+static volatile BOOL gPatchZeroMinimizeGuardArmed = NO;
+
+static void patchzero_arm_minimize_guard(double seconds) {
+    gPatchZeroMinimizeGuardArmed = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        gPatchZeroMinimizeGuardArmed = NO;
+    });
+}
+
+@implementation NSWindow (PatchZeroBlockMinimize)
+
+- (void)patched_miniaturize:(id)sender {
+    if (gPatchZeroMinimizeGuardArmed) {
+        NSLog(@"[PatchZero] Minimize guard: blocked miniaturize: on window %ld.", (long)[self windowNumber]);
+        return;
+    }
+    [self patched_miniaturize:sender];
+}
+
+@end
+
+// ── orderOut same-turn restore (main window only) ───────────────────────────
+
+@implementation NSWindow (PatchZeroRestoreAfterTamperHide)
+
+- (void)patched_orderOut:(id)sender {
+    BOOL isTamperHide = gPatchZeroMinimizeGuardArmed
+        && [self windowNumber] >= 0
+        && [self windowNumber] != gPatchZeroSuppressedWindowNumber
+        && (patchzero_is_window_number_tracked([self windowNumber]) || self.isVisible);
+    [self patched_orderOut:sender];
+    if (isTamperHide) {
+        NSLog(@"[PatchZero] Tamper check ordered out window %ld; restoring same turn.", (long)[self windowNumber]);
+        [self orderFront:nil];
+        if ([[NSApplication sharedApplication] isActive]) {
+            [self makeKeyWindow];
+        }
+    }
+}
+
+@end
+
+static void patchzero_install_minimize_guard(void) {
+    [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidMiniaturizeNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification *note) {
+        if (!gPatchZeroMinimizeGuardArmed) {
+            return;
+        }
+        NSWindow *window = [note object];
+        if (![window isKindOfClass:[NSWindow class]] || !window.isMiniaturized) {
+            return;
+        }
+        if ([window windowNumber] == gPatchZeroSuppressedWindowNumber) {
+            return;
+        }
+        NSLog(@"[PatchZero] Minimize guard: restoring window %ld minimized by tamper check.", (long)[window windowNumber]);
+        [window deminiaturize:nil];
+        [window orderFront:nil];
+    }];
+    NSLog(@"[PatchZero] Installed window minimize guard.");
+}
+
+// ── Alert suppression ───────────────────────────────────────────────────────
+
+@interface NSAlert (PatchZeroWindowAccess)
+- (NSWindow *)window;
+@end
+
+static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
+    NSWindow *alertWindow = nil;
+    if ([alert respondsToSelector:@selector(window)]) {
+        @try {
+            alertWindow = [alert window];
+        } @catch (NSException *exception) {
+            alertWindow = nil;
+        }
+    }
+    if (alertWindow) {
+        [alertWindow orderOut:nil];
+        gPatchZeroSuppressedWindowNumber = [alertWindow windowNumber];
+    }
+}
+
 @implementation NSAlert (PatchZeroSuppressPiracyWarning)
 
 - (NSModalResponse)patched_runModal {
     if (patchzero_alert_is_piracy_warning(self)) {
-        NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Stop.");
+        NSLog(@"[PatchZero] Suppressed piracy warning alert (runModal), answering Stop (no button action).");
+        patchzero_hide_suppressed_alert_window(self);
+        patchzero_arm_termination_block();
+        patchzero_arm_minimize_guard(3.0);
+        patchzero_reopen_windows_shortly();
         return NSModalResponseStop;
     }
     return [self patched_runModal];
@@ -96,7 +350,11 @@ static BOOL patchzero_alert_is_piracy_warning(NSAlert *alert) {
 
 - (void)patched_beginSheetModalForWindow:(NSWindow *)sheetWindow completionHandler:(void (^)(NSModalResponse returnCode))handler {
     if (patchzero_alert_is_piracy_warning(self)) {
-        NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Stop.");
+        NSLog(@"[PatchZero] Suppressed piracy warning alert (sheet), answering Stop (no button action).");
+        patchzero_hide_suppressed_alert_window(self);
+        patchzero_arm_termination_block();
+        patchzero_arm_minimize_guard(3.0);
+        patchzero_reopen_windows_shortly();
         if (handler) {
             handler(NSModalResponseStop);
         }
@@ -118,84 +376,6 @@ static BOOL patchzero_alert_is_piracy_warning(NSAlert *alert) {
 }
 
 @end
-
-// ── Main menu protection ─────────────────────────────────────────────────────
-
-static NSMenu *gPatchZeroProtectedMenu = nil;
-
-@implementation NSApplication (PatchZeroProtectMainMenu)
-
-- (void)patched_setMainMenu:(NSMenu *)menu {
-    if (menu == nil || menu.numberOfItems == 0) {
-        if (gPatchZeroProtectedMenu != nil && [self mainMenu] != gPatchZeroProtectedMenu) {
-            NSLog(@"[PatchZero] Blocked clearing of main menu, restoring.");
-            [self patched_setMainMenu:gPatchZeroProtectedMenu];
-        }
-        return;
-    }
-    if (gPatchZeroProtectedMenu == nil) {
-        gPatchZeroProtectedMenu = [menu retain];
-    }
-    [self patched_setMainMenu:menu];
-}
-
-@end
-
-static void patchzero_enable_menu_items(NSMenu *menu) {
-    if (menu == nil) return;
-    for (NSMenuItem *item in [menu itemArray]) {
-        if (item.hasSubmenu) {
-            patchzero_enable_menu_items(item.submenu);
-        }
-        if (item.action != NULL) {
-            item.enabled = YES;
-        }
-    }
-}
-
-// ── Activation policy pin ───────────────────────────────────────────────────
-
-@implementation NSApplication (PatchZeroProtectActivationPolicy)
-
-- (void)patched_setActivationPolicy:(NSApplicationActivationPolicy)policy {
-    if (policy != NSApplicationActivationPolicyRegular) {
-        NSLog(@"[PatchZero] Blocked setActivationPolicy:%ld, keeping Regular.", (long)policy);
-        policy = NSApplicationActivationPolicyRegular;
-    }
-    [self patched_setActivationPolicy:policy];
-}
-
-@end
-
-// ── Window restore (main window only, same turn) ─────────────────────────────
-
-static volatile BOOL gPatchZeroTamperWindowActive = NO;
-
-static void patchzero_arm_tamper_window(void) {
-    gPatchZeroTamperWindowActive = YES;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        gPatchZeroTamperWindowActive = NO;
-    });
-}
-
-@implementation NSWindow (PatchZeroRestoreAfterTamperHide)
-
-- (void)patched_orderOut:(id)sender {
-    BOOL isTamperHide = gPatchZeroTamperWindowActive
-        && self == [[NSApplication sharedApplication] mainWindow];
-    [self patched_orderOut:sender];
-    if (isTamperHide) {
-        NSLog(@"[PatchZero] Tamper check ordered out main window; restoring same turn.");
-        [self orderFront:nil];
-        if ([[NSApplication sharedApplication] isActive]) {
-            [self makeKeyWindow];
-        }
-    }
-}
-
-@end
-
-// ── Init ─────────────────────────────────────────────────────────────────────
 
 static void patchzero_install_piracy_warning_suppression(void) {
     Class cls = [NSAlert class];
@@ -222,6 +402,13 @@ static void patchzero_install_piracy_warning_suppression(void) {
         method_exchangeImplementations(originalOpenURL, patchedOpenURL);
     }
 
+    Class appCls = [NSApplication class];
+    Method originalTerminate = class_getInstanceMethod(appCls, @selector(terminate:));
+    Method patchedTerminate = class_getInstanceMethod(appCls, @selector(patched_terminate:));
+    if (originalTerminate && patchedTerminate) {
+        method_exchangeImplementations(originalTerminate, patchedTerminate);
+    }
+
     NSLog(@"[PatchZero] Hooked NSAlert to suppress the piracy warning.");
 }
 
@@ -237,54 +424,59 @@ static void patchzero_install_menu_protection(void) {
             gPatchZeroProtectedMenu = [[NSApplication sharedApplication].mainMenu retain];
         }
         NSLog(@"[PatchZero] Hooked setMainMenu: (menu bar protection).");
+    } else {
+        NSLog(@"[PatchZero] WARNING: could not hook setMainMenu:.");
     }
     if (origPolicy && replPolicy) {
         method_exchangeImplementations(origPolicy, replPolicy);
         NSLog(@"[PatchZero] Hooked setActivationPolicy: (pinned to Regular).");
-    }
-}
-
-static void patchzero_install_window_restore(void) {
-    Class cls = [NSWindow class];
-    Method orig = class_getInstanceMethod(cls, @selector(orderOut:));
-    Method repl = class_getInstanceMethod(cls, @selector(patched_orderOut:));
-    if (orig && repl) {
-        method_exchangeImplementations(orig, repl);
-        NSLog(@"[PatchZero] Hooked NSWindow orderOut: (main-window restore).");
-    }
-}
-
-// ── Container redirect ──────────────────────────────────────────────────────
-
-static NSString *patchzero_redirected_group_path(NSString *groupIdentifier) {
-    NSString *base = [NSHomeDirectory()
-        stringByAppendingPathComponent:@"Library/Application Support/TickTickPatched/GroupContainers"];
-    return [base stringByAppendingPathComponent:groupIdentifier];
-}
-
-@implementation NSFileManager (PatchZeroContainerRedirect)
-
-- (NSURL *)patched_containerURLForSecurityApplicationGroupIdentifier:(NSString *)groupIdentifier {
-    NSString *path = patchzero_redirected_group_path(groupIdentifier);
-    [self createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil];
-    return [NSURL fileURLWithPath:path isDirectory:YES];
-}
-
-@end
-
-static void patchzero_install_container_redirect(void) {
-    Class fm = [NSFileManager class];
-    Method orig = class_getInstanceMethod(fm, @selector(containerURLForSecurityApplicationGroupIdentifier:));
-    Method repl = class_getInstanceMethod(fm, @selector(patched_containerURLForSecurityApplicationGroupIdentifier:));
-    if (orig && repl) {
-        method_exchangeImplementations(orig, repl);
-        NSLog(@"[PatchZero] Redirected App Group container to a writable path.");
     } else {
-        NSLog(@"[PatchZero] WARNING: could not install container redirect.");
+        NSLog(@"[PatchZero] WARNING: could not hook setActivationPolicy:.");
     }
 }
 
-// ── JSON patch ─────────────────────────────────────────────────────────────
+static void patchzero_install_window_guards(void) {
+    Class cls = [NSWindow class];
+    Method origMini = class_getInstanceMethod(cls, @selector(miniaturize:));
+    Method replMini = class_getInstanceMethod(cls, @selector(patched_miniaturize:));
+    if (origMini && replMini) {
+        method_exchangeImplementations(origMini, replMini);
+        NSLog(@"[PatchZero] Hooked NSWindow miniaturize: (block-while-armed).");
+    } else {
+        NSLog(@"[PatchZero] WARNING: could not hook NSWindow miniaturize:.");
+    }
+    Method origOut = class_getInstanceMethod(cls, @selector(orderOut:));
+    Method replOut = class_getInstanceMethod(cls, @selector(patched_orderOut:));
+    if (origOut && replOut) {
+        method_exchangeImplementations(origOut, replOut);
+        NSLog(@"[PatchZero] Hooked NSWindow orderOut: (instant restore).");
+    } else {
+        NSLog(@"[PatchZero] WARNING: could not hook NSWindow orderOut:.");
+    }
+    patchzero_install_minimize_guard();
+}
+
+// ── Cmd+Q safety valve ───────────────────────────────────────────────────────
+
+// Match by KEYCODE (12 = kVK_ANSI_Q), not by charactersIgnoringModifiers:
+// on a Cyrillic layout the Q key yields "й", so a literal @"q" comparison
+// misses Cmd+Q every time. keyCode 12 is layout-independent.
+static void patchzero_install_quit_safety_valve(void) {
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
+        BOOL isCommandQ = (event.modifierFlags & NSEventModifierFlagCommand)
+            && (event.keyCode == 12);
+        if (isCommandQ) {
+            NSLog(@"[PatchZero] Cmd+Q seen (keyCode 12); will force-quit in 1s if the app hasn't quit by itself.");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                NSLog(@"[PatchZero] App still alive 1s after Cmd+Q; forcing exit.");
+                exit(0);
+            });
+        }
+        return event;
+    }];
+}
+
+// ── JSON patch ──────────────────────────────────────────────────────────────
 
 static const double kPatchZeroForcedProEndDateSeconds = 4070908800.0; // ~2098
 
@@ -426,6 +618,36 @@ __attribute__((used)) static const patchzero_interpose_t patchzero_interposers[]
     { (const void *)patchzero_sqlite3_column_double, (const void *)sqlite3_column_double },
 };
 
+// ── Container redirect ──────────────────────────────────────────────────────
+
+static NSString *patchzero_redirected_group_path(NSString *groupIdentifier) {
+    NSString *base = [NSHomeDirectory()
+        stringByAppendingPathComponent:@"Library/Application Support/TickTickPatched/GroupContainers"];
+    return [base stringByAppendingPathComponent:groupIdentifier];
+}
+
+@implementation NSFileManager (PatchZeroContainerRedirect)
+
+- (NSURL *)patched_containerURLForSecurityApplicationGroupIdentifier:(NSString *)groupIdentifier {
+    NSString *path = patchzero_redirected_group_path(groupIdentifier);
+    [self createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil];
+    return [NSURL fileURLWithPath:path isDirectory:YES];
+}
+
+@end
+
+static void patchzero_install_container_redirect(void) {
+    Class fm = [NSFileManager class];
+    Method orig = class_getInstanceMethod(fm, @selector(containerURLForSecurityApplicationGroupIdentifier:));
+    Method repl = class_getInstanceMethod(fm, @selector(patched_containerURLForSecurityApplicationGroupIdentifier:));
+    if (orig && repl) {
+        method_exchangeImplementations(orig, repl);
+        NSLog(@"[PatchZero] Redirected App Group container to a writable path.");
+    } else {
+        NSLog(@"[PatchZero] WARNING: could not install container redirect.");
+    }
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 __attribute__((constructor))
@@ -436,8 +658,17 @@ static void patch_init() {
     patchzero_install_piracy_warning_suppression();
     NSLog(@"[PatchZero] Installed surgical sqlite premium read interpose (isPro/isTeamPro/isActiveTeamUser + proEndDate).");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        patchzero_install_quit_safety_valve();
         patchzero_install_menu_protection();
-        patchzero_install_window_restore();
-        NSLog(@"[PatchZero] Installed menu protection and window restore.");
+        patchzero_install_window_guards();
+        // Snapshot timer: keep the tracked-window list fresh so the reopen
+        // pass knows which windows were legitimately on screen.
+        [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
+            patchzero_snapshot_visible_windows();
+        }];
+        // Arm the minimize guard for the first seconds after launch: the
+        // tamper check fires its first tick right around login/sync.
+        patchzero_arm_minimize_guard(8.0);
+        NSLog(@"[PatchZero] Installed Cmd+Q safety valve, menu protection, window guards.");
     });
 }

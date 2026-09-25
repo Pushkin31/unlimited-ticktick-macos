@@ -567,12 +567,38 @@ static void patchzero_install_json_patch(void) {
 }
 
 // ── Surgical sqlite read interpose ──────────────────────────────────────────
+//
+// Gate on the OWNING TABLE, not just the column name: forcing pro-columns on
+// a JOIN or a same-named column of another table corrupts row reads (task
+// lists stopped rendering on the second launch, when data comes from the
+// local store instead of the wire). sqlite3_column_table_name tells us which
+// table a result column really comes from; we only force when it is the user
+// table. The first forced hit also logs the statement SQL once, so any future
+// mismatch is visible in the log instead of guessed.
 
-static inline int patchzero_col_is(const sqlite3_stmt *stmt, int col, const char *const *names, int count) {
+static int patchzero_col_logged_sql = 0;
+
+static inline void patchzero_log_stmt_once(const sqlite3_stmt *stmt, const char *colname) {
+    if (patchzero_col_logged_sql >= 8) return;
+    patchzero_col_logged_sql++;
+    const char *sql = sqlite3_sql((sqlite3_stmt *)stmt);
+    NSLog(@"[PatchZero] sqlite force: col=%s stmt=%.300s", colname, sql ? sql : "<null>");
+}
+
+// Returns 1 only if the column belongs to the user table AND its name matches.
+static inline int patchzero_col_is_user_pro(const sqlite3_stmt *stmt, int col, const char *const *names, int count) {
+    const char *table = sqlite3_column_table_name((sqlite3_stmt *)stmt, col);
+    if (!table) return 0;
+    if (strcasecmp(table, "ZTTUSER") != 0 && strcasecmp(table, "USER") != 0 && strcasecmp(table, "user") != 0) {
+        return 0;
+    }
     const char *name = sqlite3_column_name((sqlite3_stmt *)stmt, col);
     if (!name) return 0;
     for (int i = 0; i < count; i++) {
-        if (strcasecmp(name, names[i]) == 0) return 1;
+        if (strcasecmp(name, names[i]) == 0) {
+            patchzero_log_stmt_once(stmt, name);
+            return 1;
+        }
     }
     return 0;
 }
@@ -586,21 +612,21 @@ static const char *const kPatchZeroProDateColumns[] = {
 static const double kPatchZeroForcedProEndReferenceSeconds = 3092601600.0; // ~2098 (Core Data ref epoch)
 
 int patchzero_sqlite3_column_int(sqlite3_stmt *stmt, int col) {
-    if (patchzero_col_is(stmt, col, kPatchZeroProBoolColumns, 6)) {
+    if (patchzero_col_is_user_pro(stmt, col, kPatchZeroProBoolColumns, 6)) {
         return 1;
     }
     return sqlite3_column_int(stmt, col);
 }
 
 sqlite3_int64 patchzero_sqlite3_column_int64(sqlite3_stmt *stmt, int col) {
-    if (patchzero_col_is(stmt, col, kPatchZeroProBoolColumns, 6)) {
+    if (patchzero_col_is_user_pro(stmt, col, kPatchZeroProBoolColumns, 6)) {
         return 1;
     }
     return sqlite3_column_int64(stmt, col);
 }
 
 double patchzero_sqlite3_column_double(sqlite3_stmt *stmt, int col) {
-    if (patchzero_col_is(stmt, col, kPatchZeroProDateColumns, 4)) {
+    if (patchzero_col_is_user_pro(stmt, col, kPatchZeroProDateColumns, 4)) {
         return kPatchZeroForcedProEndReferenceSeconds;
     }
     return sqlite3_column_double(stmt, col);

@@ -148,10 +148,8 @@ otool -arch arm64 -tV /tmp/TickTick.copy | grep -A2 '<handler addr>'
   drops provisioning-profile-backed keys — keeping them on an ad-hoc
   signature causes `Namespace CODESIGNING ... Invalid Signature`),
   re-signs, clears quarantine.
-- CI (`.github/workflows/main.yml`) — manual `workflow_dispatch` only;
-  DMG and release are named from `CFBundleShortVersionString` +
-  `CFBundleVersion` read out of the patched app's `Info.plist`;
-  release tag `v<version>` keeps one release per app version.
+- CI (`.github/workflows/main.yml`) — manual `workflow_dispatch`; builds,
+  packages the DMG, and creates a draft release.
 
 ## Why not runtime-only suppression? (history)
 

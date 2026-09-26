@@ -5,9 +5,12 @@ on:
     inputs:
       app_url:
         description: "URL to the official TickTick DMG"
-        default: "https://download.ticktick.app/download/mac/TickTick_8.0.60_468.dmg"
+        default: "https://download.ticktick.app/download/mac/TickTick_8.2.30_923.dmg"
         required: true
         type: string
+  push:
+    branches:
+      - main
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -25,9 +28,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Patch Script
+        env:
+          APP_URL: ${{ inputs.app_url || 'https://download.ticktick.app/download/mac/TickTick_8.2.30_923.dmg' }}
         run: |
           chmod +x patch.sh prepare.sh
-          ./patch.sh "${{ inputs.app_url }}"
+          ./patch.sh "$APP_URL"
 
       - name: Package to DMG
         run: |
@@ -36,7 +41,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Patched TickTick (${{ github.run_number }})
+          name: "Patched TickTick ${{ github.run_number }} (${{ github.sha }})"
           files: build/TickTick.patched.dmg
           draft: true
 

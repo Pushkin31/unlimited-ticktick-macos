@@ -32,10 +32,18 @@ def slices(data):
     endian = ">" if big else "<"
     count = struct.unpack(endian + "I", data[4:8])[0]
     out = []
+    fat64 = magic in (0xCAFEBABF, 0xBFBAFECA)
     for i in range(count):
-        cputype, _, off, size, _ = struct.unpack(
-            endian + "iiIII", data[8 + i * 20: 28 + i * 20]
-        )
+        if fat64:
+            # fat_arch_64: cputype, cpusubtype, offset(u64), size(u64),
+            # align, reserved — 32-byte records.
+            cputype, _, off, size, _, _ = struct.unpack(
+                endian + "iiQQII", data[8 + i * 32: 40 + i * 32]
+            )
+        else:
+            cputype, _, off, size, _ = struct.unpack(
+                endian + "iiIII", data[8 + i * 20: 28 + i * 20]
+            )
         out.append((cputype, off, size))
     return out
 

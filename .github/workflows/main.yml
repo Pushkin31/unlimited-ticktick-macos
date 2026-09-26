@@ -8,9 +8,6 @@ on:
         default: "https://download.ticktick.app/download/mac/TickTick_8.2.30_923.dmg"
         required: true
         type: string
-  push:
-    branches:
-      - main
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -36,13 +33,17 @@ jobs:
 
       - name: Package to DMG
         run: |
-          hdiutil create -volname "TickTick (Patched)" -srcfolder build/TickTick.patched.app -ov -format UDZO build/TickTick.patched.dmg
+          PLIST=build/TickTick.patched.app/Contents/Info.plist
+          SHORT=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$PLIST")
+          BUILD=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$PLIST")
+          echo "APP_VERSION=${SHORT}_${BUILD}" >> "$GITHUB_ENV"
+          hdiutil create -volname "TickTick (Patched)" -srcfolder build/TickTick.patched.app -ov -format UDZO "build/TickTick.patched.${SHORT}_${BUILD}.dmg"
 
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
-          name: "Patched TickTick ${{ github.run_number }} (${{ github.sha }})"
-          files: build/TickTick.patched.dmg
+          name: "Patched TickTick ${{ env.APP_VERSION }} (${{ github.run_number }} ${{ github.sha }})"
+          files: build/TickTick.patched.${{ env.APP_VERSION }}.dmg
           draft: true
 
       - name: Output Release URL

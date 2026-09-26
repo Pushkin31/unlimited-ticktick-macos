@@ -404,6 +404,7 @@ static void patchzero_hide_suppressed_alert_window(NSAlert *alert) {
             patchzero_arm_termination_block();
             patchzero_arm_startup_orderout_guard();
             patchzero_restore_startup_window();
+            return NSAlertFirstButtonReturn;
         }
         return NSModalResponseCancel;
     }
@@ -683,6 +684,14 @@ double patchzero_sqlite3_column_double(sqlite3_stmt *stmt, int col) {
     }
     return sqlite3_column_double(stmt, col);
 }
+
+// NOTE: sqlite3_column_type is deliberately NOT interposed. Forcing the
+// declared type of same-named columns on JOIN/other-table reads corrupted
+// row parsing (task lists stopped rendering), even with name-only matching;
+// re-adding it table-gated was judged not worth the regression risk. A NULL
+// ZPROENDDATE before the first sync is acceptable: the ZISPRO int reads
+// gate the UI, and the JSON wire patch persists a 2098 date on the first
+// successful profile sync.
 
 typedef struct patchzero_interpose_s {
     const void *replacement;

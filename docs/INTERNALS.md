@@ -80,6 +80,10 @@ with the old brief launch flash.
 - **Surgical sqlite interpose** — forces pro columns on reads, gated on
   the owning table (`ZTTUSER`/`USER`). Column-name-only matching corrupts
   JOIN rows and breaks task rendering on second launch.
+  `sqlite3_column_type` is deliberately NOT interposed: type-forcing broke
+  row parsing the same way. A NULL `ZPROENDDATE` before the first sync is
+  acceptable — `ZISPRO` int reads gate the UI, and the wire patch persists
+  a 2098 date on the first profile sync.
 - **Alert suppression (fallback)** — matches 41 localized piracy titles;
   first alert is answered `FirstButtonReturn` once per process (the
   startup handler only accepts that), repeats are cancelled; App Store

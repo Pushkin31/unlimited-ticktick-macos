@@ -42,6 +42,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: "v${{ env.APP_VERSION }}"
           name: "Patched TickTick ${{ env.APP_VERSION }} (${{ github.run_number }} ${{ github.sha }})"
           files: build/TickTick.patched.${{ env.APP_VERSION }}.dmg
           draft: true
